@@ -1,0 +1,13 @@
+name = "DependencyParser"
+uuid = "653b9f5c-1d2a-408c-bb0d-d6dbe2b10d61"
+authors = ["Egor Shmorgun"]
+version = "0.1.0"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
