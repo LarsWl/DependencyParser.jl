@@ -1,61 +1,77 @@
-export Configuration
-export stack_depth, buffer_lenght
+export Configuration;
+export stack_depth, buffer_length, config_push!, config_pop!, unshift!, add_arc, is_unshiftable, set_reshiftable;
 
 using DataStructures
 
 mutable struct Configuration
   buffer::Vector{Integer}
   stack::Stack{Integer}
-  sentence::Vector{Tuple{String, String}}
-  shifted::Vector{Bool}
-  unshifted::Vector{Bool}
+  sentence::Sentence
+  unshiftable::Vector{Bool}
   tree::DependencyTree
 
-  function Configuration(sentence::Vector{Tuple{String, String}})
-    buffer = map(enumerate(sentence)) do (index, _)
-      index
-    end
-    shifted = zeros(Bool, length(sentence))
-    unshifted = zeros(Bool, length(sentence))
-    stack = Stack{Integer}()
-    tree = DependencyTree(sentence)
-    
-    new(buffer, stack, sentence, shifted, tree)
-  end
-end
 
-function stack_depth(config::Configuration)
-  length(config.stack)
-end
-
-function buffer_length(config::Configuration)
-  length(config.buffer)
-end
-
-function push!(config::Configuration)
-  if buffer_lenght(config) == 0
-    return
-  end
+  Configuration(
+    buffer::Vector{Integer},
+    stack::Stack{Integer},
+    sentence::Sentence,
+    unshiftable::Vector{Bool},
+    tree::DependencyTree
+  ) = new(buffer, stack, sentence, unshiftable, tree)
   
-  buffer_element = pop!(config.buffer)
-  push!(config.stack, buffer_element)
-  shifted[buffer_element] = true
+  function Configuration(sentence::Sentence)
+    buffer = collect(1:sentence.length)
+    unshiftable = zeros(Bool, sentence.length)
+    stack = Stack{Integer}()
+    push!(stack, 0)
+    tree = DependencyTree(sentence)
+
+    new(buffer, stack, sentence, unshiftable, tree)
+  end
 end
 
-function pop!(config::Configuration)
-  if stack_depth(config) == 0
-    return
-  end
+stack_depth(config::Configuration) = length(config.stack)
+
+buffer_length(config::Configuration) = length(config.buffer)
+
+function config_push!(config::Configuration)
+  buffer_length(config) == 0 && return
+
+  buffer_element = popfirst!(config.buffer)
+  push!(config.stack, buffer_element)
+end
+
+function config_pop!(config::Configuration)
+  stack_depth(config) == 0 && return
 
   pop!(config.stack)
 end
 
 function unshift!(config::Configuration)
-  word_id = pop!(config.stack)
+  word_id = config_pop!(config)
+  if word_id === nothing
+    return
+  end
+
   insert!(config.buffer, 1, word_id)
-  config.unshifted[word_id] = true
+  config.unshiftable[word_id] = true
+end
+
+function add_arc(config::Configuration, head_id::Integer, word_id::Integer, label::String)
+  if has_head(config.tree, word_id)
+    del_arc(config.tree, word_id)
+  end
+
+  set_arc(config.tree, word_id, head_id, label)
 end
 
 function is_unshiftable(config::Configuration, word_id::Integer)
-  config.shifted[word_id]
+  1 <= word_id <= length(config.unshiftable) ? config.unshiftable[word_id] : true
+end
+
+
+function set_reshiftable(config::Configuration, word_id::Integer)
+  if 1 <= word_id <= length(config.unshiftable)
+    config.unshiftable[word_id] = false 
+  end
 end
