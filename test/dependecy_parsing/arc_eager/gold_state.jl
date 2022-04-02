@@ -3,8 +3,8 @@
   config = build_configuration()
   state = GoldState(tree, config)
 
-  head_in_stack = DependencyParser.DependencyParsing.HEAD_IN_STACK
-  head_in_buffer = DependencyParser.DependencyParsing.HEAD_IN_BUFFER
+  head_in_stack = DependencyParser.DependencyParsing.ArcEager.HEAD_IN_STACK
+  head_in_buffer = DependencyParser.DependencyParsing.ArcEager.HEAD_IN_BUFFER
 
   correct_root_dependents_in_stack = 1
   correct_root_dependents_in_buffer = 0

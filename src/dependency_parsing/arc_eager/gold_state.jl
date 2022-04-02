@@ -41,14 +41,13 @@ function update_state(state::GoldState, config::Configuration)
     end
   end
 
-  # calculate dependents for root separatly
   foreach(config.stack) do dependent
     if arc_present(state.gold_tree, 0, dependent)
       state.root_dependents_in_stack_count += 1
     end
   end
 
-  # calculate dependents for each node
+  # calculate dependents and head for each node
   for head = 1:state.gold_tree.length
     foreach(config.buffer) do dependent
       if arc_present(state.gold_tree, head, dependent)
@@ -70,35 +69,6 @@ function update_state(state::GoldState, config::Configuration)
       HEAD_ASSIGNED
     else
       HEAD_UNKNOWN
-    end
-  end
-end
-
-function push_cost(config::Configuration, gold_state::GoldState)
-  cost = 0
-  b0 = config.buffer[begin]
-  if b0 < 1
-    return FORBIDDEN_COST
-  else
-    foreach(config.stack) do word
-      if is_arc_in_gold(gold_state.gold_tree, b0, word) || is_arc_in_gold(gold_state.gold_tree, word, b0)
-        cost += 1
-      end
-    end
-  end
-end
-
-function pop_cost(config::Configuration, gold_state::GoldState)
-  cost = 0
-  s0 = first(config.stack)
-
-  if s0 < 1
-    return FORBIDDEN_COST
-  else
-    foreach(config.buffer) do word
-      if is_arc_in_gold(gold_state.gold_tree, s0, word) || is_arc_in_gold(gold_state.gold_tree, word, s0)
-        cost += 1
-      end
     end
   end
 end

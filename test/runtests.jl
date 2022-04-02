@@ -10,7 +10,7 @@ include("factories/configuration.jl")
 include("factories/gold_state.jl")
 
 @testset "DependencyParser.jl" begin
-    include("pipeline.jl")
     include("dependecy_parsing/arc_eager/moves.jl")
-    include("dependecy_parsing/gold_state.jl")
+    include("dependecy_parsing/arc_eager/gold_state.jl")
+    include("dependecy_parsing/connlu.jl")
 end
