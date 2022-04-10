@@ -9,12 +9,16 @@ using TextAnalysis
 using TextModels
 
 struct DepParser <: AbstractDepParser
+  settings::Settings
   config::Configuration
   parsing_system::ParsingSystem
   model::Model
 
-  DepParser() = new()
-  DepParser(sentence::Sentence) = new(Configuration(sentence), ArcEager.ArcEagerSystem())
+  function DepParser(model_file::String)
+    model = Model(model_file)
+    
+    new(undef, ArcEager.ArcEagerSystem(), model)
+  end
 end
 
 function (parser::DepParser)(tokens_with_tags)
@@ -25,12 +29,12 @@ function execute_transition(parser::DepParser, transition::Transition)
   execute_transition(parser.config, transition, parser.parsing_system)
 end
 
-function train!(train_file::String, system::ParsingSystem)
+function train!(system::ParsingSystem, train_file::String, embeddings_file::String)
   iterations = 10
-  corpus = load_connlu_file(train_file)
-  pos = TextModels.PerceptronTagger(true)
+  conllu_sentences = load_connlu_file(train_file)
+  settings = Settings()
 
-  model = Model()
+  model = Model(settings, system, embeddings_file, conllu_sentences)
 
   for i = 1:iterations
     for (string_doc, gold_tree) in corpus
@@ -51,4 +55,6 @@ function train!(train_file::String, system::ParsingSystem)
       execute_transition(config, transition, system)
     end
   end
+
+  write!(model)
 end

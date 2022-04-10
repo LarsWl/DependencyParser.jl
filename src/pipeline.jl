@@ -1,6 +1,5 @@
 using .Units
 using .PreprocessUnits
-using ..DependencyParsing
 
 struct Pipeline
   sentence_splitter::AbstractSentenceSplitter

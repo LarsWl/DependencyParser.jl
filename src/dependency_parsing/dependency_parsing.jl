@@ -1,7 +1,7 @@
 module DependencyParsing
   using ..DependencyParser.Core
 
-  include("model.jl")
+  include("settings.jl")
   include("parsing_system.jl")
   include("transition.jl")
   include("tree_node.jl")
@@ -9,5 +9,6 @@ module DependencyParsing
   include("connlu.jl")
   include("configuration.jl")
   include("arc_eager/arc_eager.jl")
+  include("model.jl")
   include("dep_parser.jl")
 end

@@ -9,6 +9,6 @@
   load_result = DependencyParser.DependencyParsing.load_connlu_file(filename)
   
   foreach(correct_sentences) do correct_sentence
-    @test correct_sentence in map(pair -> pair[begin].text, load_result)
+    @test correct_sentence in map(connlu_s -> connlu_s.string_doc.text, load_result)
   end
 end
