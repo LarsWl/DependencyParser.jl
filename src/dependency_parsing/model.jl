@@ -182,7 +182,8 @@ function match_embeddings!(embeddings::Matrix{Float32}, loaded_embeddings::Matri
 end
 
 function set_corpus_data!(model::Model, connlu_sentences::Vector{ConnluSentence})
-  id = 1
+  seq_id = Sequence()
+
   model.word_ids = Dict{String, Integer}()
   model.tag_ids = Dict{String, Integer}()
   model.label_ids = Dict{String, Integer}()
@@ -191,28 +192,25 @@ function set_corpus_data!(model::Model, connlu_sentences::Vector{ConnluSentence}
   update_lexicon!(corpus)
 
 
-  words = lexicon(corpus) |> keys |> collect
-  for word in words
-    model.word_ids[word] = id
-    id += 1
-  end
+  lexicon(corpus) |> keys |> collect |> words -> foreach(word -> model.word_ids[word] = next!(seq_id), words)
+  model.word_ids[UNKNOWN_TOKEN]= next!(seq_id)
+  model.word_ids[NULL_TOKEN]= next!(seq_id)
+  model.word_ids[ROOT_TOKEN]= next!(seq_id)
 
-  tags = map(conllu_sentence -> conllu_sentence.pos_tags, connlu_sentences) |>
+  map(conllu_sentence -> conllu_sentence.pos_tags, connlu_sentences) |>
     Iterators.flatten |>
     collect |>
-    unique
-  for tag in tags
-    model.tag_ids[tag] = id
-    id += 1
-  end
+    unique |>
+    tags -> foreach(tag -> model.tag_ids[tag] = next!(seq_id), tags)
+  model.tag_ids[UNKNOWN_TOKEN]= next!(seq_id)
+  model.tag_ids[NULL_TOKEN]= next!(seq_id)
+  model.tag_ids[ROOT_TOKEN]= next!(seq_id)
 
-  labels = map(conllu_sentence -> conllu_sentence.gold_tree.nodes, connlu_sentences) |>
+  map(conllu_sentence -> conllu_sentence.gold_tree.nodes, connlu_sentences) |>
     Iterators.flatten |> 
     collect |>
     nodes -> map(node -> node.label, nodes) |>
-    unique
-  for label in labels
-    model.label_ids[label] = id
-    id += 1
-  end
+    unique |>
+    labels -> foreach(label -> model.label_ids[label] = next!(seq_id), labels)
+  model.label_ids[NULL_TOKEN]= next!(seq_id)
 end

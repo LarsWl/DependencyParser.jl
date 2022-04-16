@@ -60,3 +60,33 @@ function arc_present(tree::DependencyTree, head_id::Integer, word_id::Integer)
   
   false
 end
+
+function get_left_child(tree::DependencyTree, word_id::Integer; child_number = 1)
+   (word_id < 0 || word_id > tree.length) && return NONEXIST_TOKEN
+
+   num = 0
+
+   for child_id = 1:(word_id - 1)
+    tree.nodes[child_id].head_id != word_id && continue
+
+    num += 1
+    num == child_number && return child_id
+   end
+
+   NONEXIST_TOKEN
+end
+
+function get_right_child(tree::DependencyTree, word_id::Integer; child_number = 1)
+  (word_id < 0 || word_id > tree.length) && return NONEXIST_TOKEN
+
+  num = 0
+
+  for child_id = (word_id + 1):tree.length
+   tree.nodes[child_id].head_id != word_id && continue
+
+   num += 1
+   num == child_number && return child_id
+  end
+
+  NONEXIST_TOKEN
+end

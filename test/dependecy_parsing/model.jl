@@ -6,7 +6,7 @@ using DependencyParser.DependencyParsing
     embeddings_file = "test/fixtures/embeddings_test.vec"
     connlu_sentences = load_connlu_file(connlu_file)
     system = ArcEager.ArcEagerSystem()
-    settings = Settings()
+    settings = Settings(embeddings_size = 4, hidden_size = 2, batch_size = 3)
 
   model = Model(settings, system, embeddings_file, connlu_sentences)
     @test length(model.embeddings[1, :]) == settings.embeddings_size
@@ -35,7 +35,7 @@ using DependencyParser.DependencyParsing
     label = first(model.label_ids)
 
     # manualy count from model and settings
-    correct_embeddings_info_line = "3 3 2 4"
+    correct_embeddings_info_line = "6 6 3 4"
     correct_layers_info_line = "3 2 10"
 
     word_correct_line = "$(word[begin]) $(join(model.embeddings[word[end], :], " "))"
@@ -68,8 +68,8 @@ using DependencyParser.DependencyParsing
 
     # manualy calculated from fixture model
     word_pair = Pair{String, Integer}("here", 1)
-    tag_pair = Pair{String, Integer}("TAG2", 4)
-    label_pair = Pair{String, Integer}("LABEL2", 7)
+    tag_pair = Pair{String, Integer}("TAG2", 7)
+    label_pair = Pair{String, Integer}("LABEL2", 13)
     word_embedding = Float32[1, 2, 3, 4]
     tag_embedding = Float32[3, 2, 4, 1]
     label_embedding = Float32[4, 2, 1, 3]
@@ -80,12 +80,12 @@ using DependencyParser.DependencyParsing
     hidden_layer_bias = Float32[1, 2]
     softmax_layer_weight_vector = [3, 4]
 
-    @test length(model.word_ids) == 3
-    @test length(model.tag_ids) == 3
-    @test length(model.label_ids) == 2
-    @test collect(model.word_ids)[begin] == word_pair
-    @test collect(model.tag_ids)[begin] == tag_pair
-    @test collect(model.label_ids)[begin] == label_pair
+    @test length(model.word_ids) == 6
+    @test length(model.tag_ids) == 6
+    @test length(model.label_ids) == 3
+    @test haskey(model.word_ids, word_pair[begin]) && model.word_ids[word_pair[begin]] == word_pair[end]
+    @test haskey(model.tag_ids, tag_pair[begin]) && model.tag_ids[tag_pair[begin]] == tag_pair[end]
+    @test haskey(model.label_ids, label_pair[begin]) && model.label_ids[label_pair[begin]] == label_pair[end]
     @test model.embeddings[word_pair[end], :] == word_embedding
     @test model.embeddings[tag_pair[end], :] == tag_embedding
     @test model.embeddings[label_pair[end], :] == label_embedding

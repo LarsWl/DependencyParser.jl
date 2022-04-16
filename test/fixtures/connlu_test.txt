@@ -110,3 +110,12 @@
 79	not	not	PART	PART	Polarity=Neg	77	conj	_	_
 80	DISCOVERABLE	discoverable	ADJ	A	Degree=Pos	73	acl	_	SpaceAfter=No
 81	.	.	PUNCT	FS	_	12	punct	_	_
+
+# sent_id = en_partut-ud-10
+# text = He wrote her a letter.
+1	He	he	PRP	DI	PronType=Ind	2	SBJ	_	_
+2	wrote	wrote	VBN	S	Number=Sing	0	PRD	_	_
+3	her	her	PRP	E	_	2	IOBJ	_	_
+4	a	a	DT	RD	Definite=Def|PronType=Art	5	DET	_	_
+5	letter	letter	NN	S	Number=Sing	2	DOBJ	_	_
+6	.	.	JJ	A	Degree=Pos	2	P	_	_

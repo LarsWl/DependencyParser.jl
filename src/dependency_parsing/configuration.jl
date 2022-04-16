@@ -1,7 +1,14 @@
 export Configuration;
 export stack_depth, buffer_length, config_push!, config_pop!, unshift!, add_arc, is_unshiftable, set_reshiftable;
 
+export NONEXIST_TOKEN, UNKNOWN_TOKEN, NULL_TOKEN, ROOT_TOKEN
+
 using DataStructures
+
+const NONEXIST_TOKEN = -1
+const UNKNOWN_TOKEN = "-UNKNOWN-"
+const NULL_TOKEN = "-NULL-"
+const ROOT_TOKEN = "-ROOT-"
 
 mutable struct Configuration
   buffer::Vector{Integer}
@@ -74,4 +81,39 @@ function set_reshiftable(config::Configuration, word_id::Integer)
   if 1 <= word_id <= length(config.unshiftable)
     config.unshiftable[word_id] = false 
   end
+end
+
+function get_token(config::Configuration, index::Integer)
+  index == 0 && return ROOT_TOKEN
+
+  1 <= index <= config.sentence.length && return config.sentence.tokens[index].name
+
+  NULL_TOKEN
+end
+
+function get_tag(config::Configuration, index::Integer)
+  index == 0 && return ROOT_TOKEN
+  
+  1 <= index <= config.sentence.length && return config.sentence.pos_tags[index].name
+
+  NULL_TOKEN
+end
+
+function get_label(config::Configuration, index::Integer)
+  1 <= index <= config.sentence.length && return config.tree.nodes[index].label
+
+  NULL_TOKEN
+end
+
+function get_buffer_element(config::Configuration, index::Integer)
+  1 <= index <= buffer_length(config) && return config.buffer[index]
+
+  NONEXIST_TOKEN
+end
+
+function get_stack_element(config::Configuration, index::Integer)
+  stack_vector = collect(config.stack)
+  1 <= index <= stack_depth(config) && return stack_vector[index]
+
+  NONEXIST_TOKEN
 end
