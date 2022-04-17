@@ -12,7 +12,7 @@ using DependencyParser.DependencyParsing
     @test length(model.embeddings[1, :]) == settings.embeddings_size
     @test length(model.hidden_layer.weight[:, 1]) == settings.hidden_size
     @test length(model.hidden_layer.weight[1, :]) == settings.batch_size * settings.embeddings_size
-    @test length(model.softmax_layer.weight[:, 1]) == ArcEager.transitions_number(system)
+    @test length(model.output_layer.weight[:, 1]) == ArcEager.transitions_number(system)
   end
   
   @testset "Write to file" begin
@@ -44,7 +44,7 @@ using DependencyParser.DependencyParsing
 
     hidden_weight_correct_line = join(model.hidden_layer.weight[begin, :], " ")
     hidden_bias_correct_line = join(model.hidden_layer.bias, " ")
-    softmax_weight_correct_line = join(model.softmax_layer.weight[begin, :], " ")
+    softmax_weight_correct_line = join(model.output_layer.weight[begin, :], " ")
 
     lines = readlines(filename)
 
@@ -90,10 +90,22 @@ using DependencyParser.DependencyParsing
     @test model.embeddings[tag_pair[end], :] == tag_embedding
     @test model.embeddings[label_pair[end], :] == label_embedding
     @test length(model.hidden_layer.bias) == hidden_size
-    @test length(model.softmax_layer.weight[begin, :]) == hidden_size
-    @test length(model.softmax_layer.weight[:, begin]) == labels_num
+    @test length(model.output_layer.weight[begin, :]) == hidden_size
+    @test length(model.output_layer.weight[:, begin]) == labels_num
     @test model.hidden_layer.bias == hidden_layer_bias
     @test model.hidden_layer.weight[begin, :] == hidden_layer_weight_vector
-    @test model.softmax_layer.weight[begin, :] == softmax_layer_weight_vector
+    @test model.output_layer.weight[begin, :] == softmax_layer_weight_vector
+  end
+
+  @testset "Model prediction" begin
+    parser = build_dep_parser()
+    config = build_configuration()
+    model = parser.model
+    batch = build_correct_batch(parser, config)
+
+    prediction = predict(model, batch)
+
+    @test length(prediction) == ArcEager.transitions_number(parser.parsing_system)
+    @test round(sum(prediction)) == 1
   end
 end

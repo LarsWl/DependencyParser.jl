@@ -1,5 +1,5 @@
 export DepParser
-export execute_transition, form_batch
+export execute_transition, form_batch, predict_transition
 
 using ..DependencyParser.Units
 import .ArcEager: GoldState
@@ -16,10 +16,10 @@ struct DepParser <: AbstractDepParser
   function DepParser(settings::Settings, model_file::String)
     model = Model(model_file)
     
-    new(settings, undef, ArcEager.ArcEagerSystem(), model)
+    new(settings, ArcEager.ArcEagerSystem(), model)
   end
 
-  DepParser(settings::Settings, model::Model) = new(settings, ArcEager.ArcEagerSystem(), model)
+  DepParser(settings::Settings, model::Model, system::ParsingSystem) = new(settings, system, model)
 end
 
 function (parser::DepParser)(tokens_with_tags)
@@ -73,7 +73,7 @@ const STACK_OFFSET = 6
 const STACK_NUMBER = 6
 
 function form_batch(parser::DepParser, config::Configuration)
-  batch = zeros(Int32, parser.settings.batch_size)
+  batch = zeros(Integer, parser.settings.batch_size)
 
   word_id_by_word_index(word_index::Integer) = get_token(config, word_index) |> token -> get_word_id(parser, token)
   tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(parser, tag)
@@ -117,6 +117,13 @@ function form_batch(parser::DepParser, config::Configuration)
   end
 
   batch
+end
+
+function predict_transition(parser::DepParser, config::Configuration)
+  form_batch(parser, config) |> 
+    batch -> predict(parser.model, batch) |>
+    findmax |>
+    max_score_wiht_index -> parser.parsing_system.transitions[max_score_wiht_index[end]]
 end
 
 function get_word_id(parser::DepParser, word::String)
