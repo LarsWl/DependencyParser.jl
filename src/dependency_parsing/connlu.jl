@@ -34,10 +34,10 @@ function convert(sentence_data)
   end
 
   tree = DependencyTree(root, nodes, length(nodes))
-  token_doc = TokenDocument(map(word -> word[2], words))
+  token_doc = TokenDocument(map(word -> String(word[2]), words))
   string_doc = findfirst(line -> occursin(r"# text = ", line), lines) |> 
     index -> StringDocument(replace(lines[index], r"# text = " => ""))
-  pos_tags = map(word -> word[3], words)
+  pos_tags = map(word -> String(word[3]), words)
 
   [token_doc, string_doc, pos_tags, tree]
 end

@@ -11,6 +11,7 @@ const HEAD_IN_BUFFER = 3
 
 mutable struct GoldState
   gold_tree::DependencyTree
+  system::ArcEagerSystem
   root_dependents_in_stack_count::Integer
   root_dependents_in_buffer_count::Integer
   dependents_in_stack_count::Vector{Integer}
@@ -18,8 +19,8 @@ mutable struct GoldState
   heads_states::Vector{Integer}
   config::Configuration
 
-  function GoldState(gold_tree::DependencyTree, config::Configuration) 
-    state = new(gold_tree)
+  function GoldState(gold_tree::DependencyTree, config::Configuration, system::ArcEagerSystem) 
+    state = new(gold_tree, system)
     update_state(state, config)
 
     state
@@ -75,3 +76,27 @@ end
 
 head_in_stack(state::GoldState, config::Configuration, word::Integer) = state.gold_tree.nodes[word].head_id in config.stack
 head_in_buffer(state::GoldState, config::Configuration, word::Integer) = state.gold_tree.nodes[word].head_id in config.buffer
+
+function dependents_in_buffer_count(state::GoldState, word_id::Integer)
+  word_id == 0 ? state.root_dependents_in_buffer_count : state.dependents_in_buffer_count[word_id]
+end
+
+function dependents_in_stack_count(state::GoldState, word_id::Integer)
+  word_id == 0 ? state.root_dependents_in_stack_count : state.dependents_in_stack_count[word_id]
+end
+
+function head_state(state::GoldState, word_id::Integer)
+  word_id == 0 && return HEAD_UNKNOWN
+
+  state.heads_states[word_id]
+end
+
+
+function label_correct(gold_state::GoldState, word_id::Integer, label::String)
+  if 1 <= word_id <= gold_state.gold_tree.length
+    node = gold_state.gold_tree.nodes[word_id]
+    return node.label == label
+  end
+  
+  false
+end

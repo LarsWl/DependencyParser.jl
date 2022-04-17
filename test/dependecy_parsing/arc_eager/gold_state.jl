@@ -1,7 +1,8 @@
 @testset "GoldState" begin
   tree = build_gold_tree()
   config = build_configuration()
-  state = GoldState(tree, config)
+  system = ArcEagerSystem()
+  state = GoldState(tree, config, system)
 
   head_in_stack = DependencyParser.DependencyParsing.ArcEager.HEAD_IN_STACK
   head_in_buffer = DependencyParser.DependencyParsing.ArcEager.HEAD_IN_BUFFER

@@ -108,4 +108,32 @@ using DependencyParser.DependencyParsing
     @test length(prediction) == ArcEager.transitions_number(parser.parsing_system)
     @test round(sum(prediction)) == 1
   end
+
+  @testset "Model update" begin
+    parser = build_dep_parser()
+    config = build_configuration()
+    gold_state = build_updated_gold_state(config, system=parser.parsing_system)
+    model = parser.model
+
+    batch = build_correct_batch(parser, config)
+    gold = ArcEager.transition_costs(gold_state)
+
+    loss_before_update = loss_function(model, batch, gold)
+    update_model!(model, batch, gold)
+    loss_after_update = loss_function(model, batch, gold)
+
+    @test loss_after_update < loss_before_update
+  end
 end
+
+parser = build_dep_parser()
+    config = build_configuration()
+    gold_state = build_updated_gold_state(config, system=parser.parsing_system)
+    model = parser.model
+
+    batch = build_correct_batch(parser, config)
+    gold = ArcEager.transition_costs(gold_state) |> softmax
+
+    loss_before_update = loss_function(model, batch, gold)
+    update_model!(model, batch, gold)
+    loss_function(model, batch, gold)

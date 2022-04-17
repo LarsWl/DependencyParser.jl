@@ -1,5 +1,5 @@
 export Model
-export write_to_file!, predict
+export write_to_file!, predict, loss_function, update_model!
 
 import .ArcEager: transitions_number, set_labels!
 
@@ -14,18 +14,24 @@ mutable struct Model
   embeddings::Matrix{Float32}
   hidden_layer::Dense
   output_layer::Dense
+  chain::Chain
   word_ids::Dict{String, Integer}
   tag_ids::Dict{String, Integer}
   label_ids::Dict{String, Integer}
 
-  Model(
+  function Model(
     embeddings::Matrix{Float32},
     hidden_layer::Dense,
     output_layer::Dense,
     word_ids::Dict{String, Integer},
     tag_ids::Dict{String, Integer},
     label_ids::Dict{String, Integer},
-  ) = new(embeddings, hidden_layer, output_layer, word_ids, tag_ids, label_ids)
+  )
+    model = new(embeddings, hidden_layer, output_layer, Chain(), word_ids, tag_ids, label_ids)
+    model.chain = form_chain(model)
+
+    model
+  end
 
 
   function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
@@ -43,9 +49,10 @@ mutable struct Model
     model.embeddings = rand(Float32, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
-    model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size, cube_activation)
+    model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
     model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false)
-
+    model.chain = form_chain(model)
+    
     model
   end
 
@@ -96,11 +103,14 @@ mutable struct Model
       output_layer[i, :] = split(line) |> values -> map(value -> parse(Float32, value), values)
     end
 
-    new(embeddings, Dense(hidden_layer, hidden_bias, cube_activation), Dense(output_layer, false), word_ids, tag_ids, label_ids)
+    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), Chain(), word_ids, tag_ids, label_ids)
+    model.chain = form_chain(model)
+
+    model
   end
 end
 
-function predict(model::Model, batch::Vector{Integer})
+function form_chain(model::Model)
   hidden_layer_calculation = function (input::Vector{Integer})
     result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
     batch_size = length(input)
@@ -111,25 +121,34 @@ function predict(model::Model, batch::Vector{Integer})
       offset = (i - 1) * embeddings_size
       W_slice = model.hidden_layer.weight[:, (offset + 1) : (offset + embeddings_size)]
 
-      println(W_slice * x + model.hidden_layer.bias)
-
-      result += model.hidden_layer.σ.(W_slice * x + model.hidden_layer.bias)
+      result += (W_slice * x + model.hidden_layer.bias) .^ 3
     end
 
     result
   end
 
-  chain = Chain(
+  Chain(
     hidden_layer_calculation,
     model.output_layer,
     softmax
   )
-
-  chain(batch)
 end
 
-function cube_activation(elem::Float32)
-  elem ^ 3
+function predict(model::Model, batch::Vector{Integer})
+  model.chain(batch)
+end
+
+function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
+  loss(x, y) = loss_function(model, x, y)
+
+  params = Flux.params(model.embeddings, model.hidden_layer.weight, model.output_layer.weight)
+  opt = Flux.Descent(0.1)
+
+  Flux.train!(loss, params, [(batch, gold)], opt)
+end
+
+function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
+  Flux.Losses.crossentropy(predict(model, batch), gold)
 end
 
 #=

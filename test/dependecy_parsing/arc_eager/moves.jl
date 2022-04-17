@@ -37,7 +37,7 @@ using DependencyParser.DependencyParsing.ArcEager
       gold_state = build_updated_gold_state(config)
       correct_cost = 0
 
-      @test cost(gold_state, shift) == correct_cost
+      @test cost(gold_state, shift, "") == correct_cost
     end
   end
 
@@ -73,11 +73,11 @@ using DependencyParser.DependencyParsing.ArcEager
       config = build_configuration()
       gold_state = build_updated_gold_state(config)
       correct_cost = 0
-      @test cost(gold_state, reduce) == correct_cost
+      @test cost(gold_state, reduce, "") == correct_cost
       pop!(config.stack)
       gold_state = build_updated_gold_state(config)
       correct_cost = 2
-      @test cost(gold_state, reduce) == correct_cost
+      @test cost(gold_state, reduce, "") == correct_cost
     end
   end
 
@@ -111,7 +111,7 @@ using DependencyParser.DependencyParsing.ArcEager
       config = build_configuration()
       gold_state = build_updated_gold_state(config)
       correct_cost = -1
-      @test cost(gold_state, right_arc) == correct_cost
+      @test cost(gold_state, right_arc, "SOME") == correct_cost
     end
   end
 
@@ -145,7 +145,7 @@ using DependencyParser.DependencyParsing.ArcEager
       config = build_configuration()
       gold_state = build_updated_gold_state(config)
       correct_cost = 1
-      @test cost(gold_state, left_arc) == correct_cost
+      @test cost(gold_state, left_arc, "SOME") == correct_cost
     end
   end
 end

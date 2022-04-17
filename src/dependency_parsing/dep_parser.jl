@@ -3,7 +3,7 @@ export execute_transition, form_batch, predict_transition
 
 using ..DependencyParser.Units
 import .ArcEager: GoldState
-import .ArcEager: execute_transition, zero_cost
+import .ArcEager: execute_transition, zero_cost_transitions, transition_costs
 
 using TextAnalysis
 using TextModels
@@ -30,36 +30,49 @@ function execute_transition(parser::DepParser, transition::Transition)
   execute_transition(parser.config, transition, parser.parsing_system)
 end
 
-function train!(system::ParsingSystem, train_file::String, embeddings_file::String)
+function train!(system::ParsingSystem, train_file::String, embeddings_file::String, model_file::String)
   iterations = 10
+
+  println("Parse train file...")
   conllu_sentences = load_connlu_file(train_file)
   settings = Settings()
 
+  println("Build initial model...")
   model = Model(settings, system, embeddings_file, conllu_sentences)
+  parser = DepParser(settings, model, system)
 
   for i = 1:iterations
-    for (string_doc, gold_tree) in corpus
-      sentence = tokens(string_doc.text) |> pos |> Sentence
+    for conllu_sentence in conllu_sentences
+      sentence = zip(conllu_sentence.token_doc.tokens, conllu_sentence.pos_tags) |> collect |> Sentence
+
+      println("Предложение: $(string_doc.text)")
 
       config = Configuration(sentence)
-      gold_state = GoldState(gold_tree, config)
 
-      preticted_transition = predict(model, config)
-      zero_cost_transitions = zero_cost(gold_state)
+      while !is_terminal(config)
+        gold_state = GoldState(gold_tree, config, system)
 
-      if predicted_transition in zero_cost_transitions
-        update_model(model)
+        predicted_transition = predict_transition(model, config)
+        zero_cost_transitions = zero_cost_transitions(gold_state)
+
+        if !(predicted_transition in zero_cost_transitions)
+          batch = form_batch(parser, config)
+          gold = transition_costs(gold_state) |> softmax
+
+          update_model!(model, batch, gold)
+
+          println("LOSS: $(loss_function(model, batch, gold))")
+        end
+
+        transition = rand(zero_cost_transitions)
+
+        execute_transition(config, transition, system)
       end
-
-      transition = zero_cost_transitions[begin]
-
-      execute_transition(config, transition, system)
     end
   end
 
-  write!(model)
+  write_to_file!(model, model_file)
 end
-
 
 #=
 while batch_size only is 48 there is structure of batch

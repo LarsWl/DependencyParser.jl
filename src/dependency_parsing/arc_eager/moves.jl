@@ -20,14 +20,14 @@ struct Break <: Move end;
 #=
   Cost: push_cost 
 =#
-function cost(state::GoldState, move::Shift)
+function cost(state::GoldState, move::Shift, label::String)
   cost = 0
-  if state.heads_states[state.config.buffer[begin]] == HEAD_IN_STACK &&
+  if head_state(state, state.config.buffer[begin]) == HEAD_IN_STACK &&
     state.gold_tree.nodes[state.config.buffer[begin]].head_id != first(state.config.stack)
     cost += 1
   end
 
-  cost += state.dependents_in_stack_count[state.config.buffer[begin]]
+  cost += dependents_in_stack_count(state, state.config.buffer[begin])
 
   cost
 end
@@ -62,21 +62,20 @@ Cost:
   * If arc has no head, we're saving arcs between S[0] and S[1:], so decrement
       cost by those arcs.
 =#
-function cost(state::GoldState, move::Reduce)
+function cost(state::GoldState, move::Reduce, label::String)
   cost = 0
-  state.config.buffer[begin] == 0 && return cost
 
-  cost += state.dependents_in_buffer_count[first(state.config.stack)]
-  if state.heads_states[first(state.config.stack)] == HEAD_IN_BUFFER
+  cost += dependents_in_buffer_count(state, first(state.config.stack))
+  if head_state(state, first(state.config.stack)) == HEAD_IN_BUFFER
     cost += 1
   end
 
   if !has_head(state.config.tree, first(state.config.stack))
-    if state.heads_states[first(state.config.stack)] == HEAD_IN_STACK
+    if head_state(state, first(state.config.stack)) == HEAD_IN_STACK
       cost -= 1
     end
 
-    cost -= state.dependents_in_stack_count[first(state.config.stack)]
+    cost -= dependents_in_stack_count(state, first(state.config.stack))
   end
 
   cost
@@ -85,17 +84,11 @@ end
 #=
   Validity:
     * Stack not empty
-    * Buffer nt empty
-    * Stack depth 1 and cannot senten start l_edge(st.B(0)) ?
 =#
 function is_valid(config::Configuration, move::Reduce)
-  if stack_depth(config) == 0
-    return false
-  elseif buffer_length(config) == 0
-    return false
-  else
-    return true
-  end
+  stack_depth(config) == 0 && return false
+    
+  true
 end
 
 # Pop from the stack. If it has no head and the stack isn't empty, place it back on the buffer.
@@ -108,19 +101,29 @@ function transition(config::Configuration, label::String, move::Reduce)
 end
 
 # push_cost + (not shifted[b0] and Arc(B[1:], B[0])) - Arc(S[0], B[0], label): NOT VALID COMMENT
-function cost(state::GoldState, move::RightArc)
+function cost(state::GoldState, move::RightArc, label::String)
   cost = 0
+  stack = state.config.stack |> collect
+  s0 = stack[begin]
   b0 = state.config.buffer[begin]
-  cost += state.dependents_in_stack_count[b0]
-  if state.heads_states[b0] == HEAD_IN_STACK
+  b0_gold_head = state.gold_tree.nodes[b0].head_id
+
+  cost += dependents_in_stack_count(state, b0)
+  if head_state(state, b0) == HEAD_IN_STACK
     cost += 1
-  elseif state.heads_states[b0] == HEAD_IN_BUFFER
+  end
+
+  if b0_gold_head == s0
     cost -= 1
+    if !label_correct(state, b0, label)
+      cost += 1
+    end
+  elseif head_state(state, b0) == HEAD_IN_BUFFER && !state.config.unshiftable[b0]
+    cost += 1
   end
 
   cost
 end
-
 #=
   Validity:
   * len(S) >= 1
@@ -147,22 +150,34 @@ function transition(config::Configuration, label::String, move::RightArc)
 end
 
 # pop_cost - Arc(B[0], S[0], label) + (Arc(S[1], S[0]) if H(S[0]) else Arcs(S, S[0])): NOT VALID COMMENT
-function cost(state::GoldState, move::LeftArc)
+function cost(state::GoldState, move::LeftArc, label::String)
   cost = 0
-  s0 = first(state.config.stack)
+  stack = state.config.stack |> collect
+  s0 = stack[begin]
   b0 = state.config.buffer[begin]
-  cost += state.dependents_in_buffer_count[s0]
-  if state.heads_states[s0] == HEAD_IN_BUFFER
+  s0_gold_head = s0 == 0 ? EMPTY_NODE : state.gold_tree.nodes[s0].head_id
+
+  cost += dependents_in_buffer_count(state, s0)
+  if head_state(state, s0) == HEAD_IN_BUFFER
     cost += 1
   end
-  has_head(state.config.tree, s0) || return cost
 
-  s0_head = state.config.tree.nodes[s0].head_id
-  s0_gold_head = state.gold_tree.nodes[s0].head_id
-  if s0_head == s0_gold_head
-    cost += 1
-  elseif (s0_gold_head in state.config.buffer) && s0_gold_head != b0
-    cost += 1
+  if has_head(state.config.tree, s0)
+    if stack_depth(state.config) >= 2 && s0_gold_head == stack[begin + 1]
+      cost += 1
+    end
+  else
+    if head_state(state, s0) == HEAD_IN_STACK
+      cost += 1
+    end
+    cost += dependents_in_stack_count(state, s0)
+  end
+  
+  if s0_gold_head == b0
+    cost -= 1
+    if !label_correct(state, s0, label)
+      cost += 1
+    end
   end
 
   cost
@@ -188,6 +203,7 @@ end
 function transition(config::Configuration, label::String, move::LeftArc)
   head = config.buffer[begin]
   dependent = config_pop!(config)
+  has_head(config.tree, dependent) && del_arc(config.tree, dependent)
   add_arc(config, head, dependent, label)
   set_reshiftable(config, dependent)
 end

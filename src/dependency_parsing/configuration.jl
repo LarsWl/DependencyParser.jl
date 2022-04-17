@@ -1,5 +1,6 @@
 export Configuration;
 export stack_depth, buffer_length, config_push!, config_pop!, unshift!, add_arc, is_unshiftable, set_reshiftable;
+export has_head, del_arc;
 
 export NONEXIST_TOKEN, UNKNOWN_TOKEN, NULL_TOKEN, ROOT_TOKEN
 
@@ -65,10 +66,6 @@ function unshift!(config::Configuration)
 end
 
 function add_arc(config::Configuration, head_id::Integer, word_id::Integer, label::String)
-  if has_head(config.tree, word_id)
-    del_arc(config.tree, word_id)
-  end
-
   set_arc(config.tree, word_id, head_id, label)
 end
 
@@ -116,4 +113,8 @@ function get_stack_element(config::Configuration, index::Integer)
   1 <= index <= stack_depth(config) && return stack_vector[index]
 
   NONEXIST_TOKEN
+end
+
+function is_terminal(config::Configuration)
+  stack_depth(config) == 1 && buffer_length(config) == 0
 end
