@@ -6,7 +6,6 @@ import .ArcEager: GoldState
 import .ArcEager: execute_transition, zero_cost_transitions, transition_costs
 
 using TextAnalysis
-using TextModels
 
 struct DepParser <: AbstractDepParser
   settings::Settings
@@ -45,17 +44,17 @@ function train!(system::ParsingSystem, train_file::String, embeddings_file::Stri
     for conllu_sentence in conllu_sentences
       sentence = zip(conllu_sentence.token_doc.tokens, conllu_sentence.pos_tags) |> collect |> Sentence
 
-      println("Предложение: $(string_doc.text)")
+      println("Предложение: $(conllu_sentence.string_doc.text)")
 
       config = Configuration(sentence)
 
       while !is_terminal(config)
-        gold_state = GoldState(gold_tree, config, system)
+        gold_state = GoldState(conllu_sentence.gold_tree, config, system)
 
-        predicted_transition = predict_transition(model, config)
-        zero_cost_transitions = zero_cost_transitions(gold_state)
+        predicted_transition = predict_transition(parser, config)
+        zero_transitions = zero_cost_transitions(gold_state)
 
-        if !(predicted_transition in zero_cost_transitions)
+        if !(predicted_transition in zero_transitions)
           batch = form_batch(parser, config)
           gold = transition_costs(gold_state) |> softmax
 
@@ -64,7 +63,7 @@ function train!(system::ParsingSystem, train_file::String, embeddings_file::Stri
           println("LOSS: $(loss_function(model, batch, gold))")
         end
 
-        transition = rand(zero_cost_transitions)
+        transition = rand(zero_transitions)
 
         execute_transition(config, transition, system)
       end
@@ -73,6 +72,13 @@ function train!(system::ParsingSystem, train_file::String, embeddings_file::Stri
 
   write_to_file!(model, model_file)
 end
+
+system = ArcEager.ArcEagerSystem()
+train_file = "/Users/admin/education/materials/UD_English-ParTUT/en_partut-ud-train.conllu"
+embedding_file = "/Users/admin/education/materials/fastvec.vec"
+model_file = "tmp/test.txt"
+
+train!(system, train_file, embedding_file, model_file)
 
 #=
 while batch_size only is 48 there is structure of batch

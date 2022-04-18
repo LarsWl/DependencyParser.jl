@@ -4,6 +4,8 @@ export write_to_file!, predict, loss_function, update_model!
 import .ArcEager: transitions_number, set_labels!
 
 using Flux
+using JLD2
+
 #=
   Input layer dimension: batch_size * embeddings_size
   hidden layer weights dimension(h): hidden_size * (batch_size * embeddings_size)
@@ -37,7 +39,7 @@ mutable struct Model
   function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
     model = new()
 
-    loaded_embeddings, embedding_ids = read_embeddings_file(embeddings_file)
+    loaded_embeddings, embedding_ids = cache_data(read_embeddings_file, "tmp/cache", "path", embeddings_file)
     embeddings_size = length(loaded_embeddings[begin, :])
     if embeddings_size != settings.embeddings_size
       ArgumentError("Incorrect embeddings dimensions. Given: $(embeddings_size). In settings: $(settings.embeddings_size)") |> throw
@@ -110,6 +112,24 @@ mutable struct Model
   end
 end
 
+function cache_data(func::Function, filename::String, path::String, args...; kwargs...)
+  local prepared = nothing
+  if isfile(filename)
+    jldopen(filename, "r") do file
+      if haskey(file, path)
+        prepared = file[path]
+      end
+    end
+  end
+  if isnothing(prepared)
+    prepared = func(args...; kwargs...)
+    jldopen(filename, "a+") do file
+      file[path] = prepared
+    end
+  end
+  return prepared
+end
+
 function form_chain(model::Model)
   hidden_layer_calculation = function (input::Vector{Integer})
     result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
@@ -148,7 +168,9 @@ function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float3
 end
 
 function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
-  Flux.Losses.crossentropy(predict(model, batch), gold)
+  # Flux.Losses.crossentropy(predict(model, batch), gold)
+
+  sum(.- sum(gold .* logsoftmax(predict(model, batch))))
 end
 
 #=
