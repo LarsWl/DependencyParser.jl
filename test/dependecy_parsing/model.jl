@@ -101,7 +101,7 @@ using DependencyParser.DependencyParsing
     parser = build_dep_parser()
     config = build_configuration()
     model = parser.model
-    batch = build_correct_batch(parser, config)
+    batch = build_correct_batch(parser.model, config)
 
     prediction = predict(model, batch)
 
@@ -115,7 +115,7 @@ using DependencyParser.DependencyParsing
     gold_state = build_updated_gold_state(config, system=parser.parsing_system)
     model = parser.model
 
-    batch = build_correct_batch(parser, config)
+    batch = build_correct_batch(parser.model, config)
     gold = ArcEager.transition_costs(gold_state)
 
     loss_before_update = loss_function(model, batch, gold)
@@ -124,16 +124,13 @@ using DependencyParser.DependencyParsing
 
     @test loss_after_update < loss_before_update
   end
-end
 
-parser = build_dep_parser()
+  @testset "Test form batch" begin
+    parser = build_dep_parser()
     config = build_configuration()
-    gold_state = build_updated_gold_state(config, system=parser.parsing_system)
     model = parser.model
 
-    batch = build_correct_batch(parser, config)
-    gold = ArcEager.transition_costs(gold_state) |> softmax
-
-    loss_before_update = loss_function(model, batch, gold)
-    update_model!(model, batch, gold)
-    loss_function(model, batch, gold)
+    correct_batch = build_correct_batch(model, config)
+    @test form_batch(model, parser.settings, config) == correct_batch
+  end
+end

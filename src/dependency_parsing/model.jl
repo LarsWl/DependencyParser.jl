@@ -1,7 +1,8 @@
 export Model
 export write_to_file!, predict, loss_function, update_model!
 
-import .ArcEager: transitions_number, set_labels!
+import .ArcEager: transitions_number, set_labels!, execute_transition, zero_cost_transitions, transition_costs
+import .ArcEager: GoldState
 
 using Flux
 using JLD2
@@ -39,7 +40,7 @@ mutable struct Model
   function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
     model = new()
 
-    loaded_embeddings, embedding_ids = cache_data(read_embeddings_file, "tmp/cache", "path", embeddings_file)
+    loaded_embeddings, embedding_ids = read_embeddings_file(embeddings_file)
     embeddings_size = length(loaded_embeddings[begin, :])
     if embeddings_size != settings.embeddings_size
       ArgumentError("Incorrect embeddings dimensions. Given: $(embeddings_size). In settings: $(settings.embeddings_size)") |> throw
@@ -162,15 +163,47 @@ function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float3
   loss(x, y) = loss_function(model, x, y)
 
   params = Flux.params(model.embeddings, model.hidden_layer.weight, model.output_layer.weight)
-  opt = Flux.Descent(0.1)
+  opt = Flux.ADAGrad()
 
   Flux.train!(loss, params, [(batch, gold)], opt)
 end
 
 function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
-  # Flux.Losses.crossentropy(predict(model, batch), gold)
+  Flux.Losses.crossentropy(predict(model, batch), gold)
+end
 
-  sum(.- sum(gold .* logsoftmax(predict(model, batch))))
+function train!(model::Model, settings::Settings, connlu_sentences::Vector{ConnluSentence})
+  iterations = 10
+
+  for i = 1:iterations
+    for connlu_sentence in connlu_sentences
+      sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
+
+      println("Предложение: $(connlu_sentence.string_doc.text)")
+
+      config = Configuration(sentence)
+
+      while !is_terminal(config)
+        gold_state = GoldState(connlu_sentence.gold_tree, config, system)
+
+        predicted_transition = predict_transition(parser, config)
+        zero_transitions = zero_cost_transitions(gold_state)
+
+        if !(predicted_transition in zero_transitions)
+          batch = form_batch(model, settings, config)
+          gold = transition_costs(gold_state) |> softmax
+
+          update_model!(model, batch, gold)
+
+          println("LOSS: $(loss_function(model, batch, gold))")
+        end
+
+        transition = rand(zero_transitions)
+
+        execute_transition(config, transition, system)
+      end
+    end
+  end
 end
 
 #=
@@ -286,4 +319,74 @@ function set_corpus_data!(model::Model, connlu_sentences::Vector{ConnluSentence}
     unique |>
     labels -> foreach(label -> model.label_ids[label] = next!(seq_id), labels)
   model.label_ids[NULL_TOKEN]= next!(seq_id)
+end
+
+#=
+while batch_size only is 48 there is structure of batch
+1-18 - word_ids
+19-36 - tag_ids
+37-48 - label_ids
+=#
+const POS_OFFSET = 18
+const LABEL_OFFSET = 36
+const STACK_OFFSET = 6
+const STACK_NUMBER = 6
+
+function form_batch(model::Model, settings::Settings, config::Configuration)
+  batch = zeros(Integer, settings.batch_size)
+
+  word_id_by_word_index(word_index::Integer) = get_token(config, word_index) |> token -> get_word_id(model, token)
+  tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(model, tag)
+  label_id_by_word_index(word_index::Integer) = get_label(config, word_index) |> label -> get_label_id(model, label)
+
+  # add top three stack elements and top three buffers elems with their's tags
+  for i = 1:3
+    stack_word_index = get_stack_element(config, i)
+    buffer_word_index = get_buffer_element(config, i)
+
+    batch[i] = word_id_by_word_index(stack_word_index)
+    batch[i + POS_OFFSET] = tag_id_by_word_index(stack_word_index)
+    batch[i + 3] = word_id_by_word_index(buffer_word_index)
+    batch[i + POS_OFFSET + 3] = tag_id_by_word_index(buffer_word_index)
+  end
+
+  #=
+    Add: 
+    The first and second leftmost / rightmost children of the top two words on the stack and
+    The leftmost of leftmost / rightmost of rightmost children of the top two words on the stack
+  =#
+  for stack_id = 1:2
+    stack_word_index = get_stack_element(config, stack_id)
+
+    set_word_data_by_index_with_offset = function (word_index::Integer, additional_offset)
+      batch[STACK_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = word_id_by_word_index(word_index)
+      batch[STACK_OFFSET + POS_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = tag_id_by_word_index(word_index)
+      batch[LABEL_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = label_id_by_word_index(word_index)
+    end
+
+    get_left_child(config.tree, stack_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, 1)
+    get_right_child(config.tree, stack_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, 2)
+    get_left_child(config.tree, stack_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, 3)
+    get_right_child(config.tree, stack_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, 4)
+    get_left_child(config.tree, stack_word_index) |> 
+      word_index -> get_left_child(config.tree, word_index) |>
+      word_index -> set_word_data_by_index_with_offset(word_index, 5)
+    get_right_child(config.tree, stack_word_index) |> 
+      word_index -> get_right_child(config.tree, word_index) |>
+      word_index -> set_word_data_by_index_with_offset(word_index, 6)
+  end
+
+  batch
+end
+
+function get_word_id(model::Model, word::String)
+  haskey(model.word_ids, word) ? model.word_ids[word] : model.word_ids[UNKNOWN_TOKEN]
+end
+
+function get_tag_id(model::Model, tag::String)
+  haskey(model.tag_ids, tag) ? model.tag_ids[tag] : model.tag_ids[UNKNOWN_TOKEN]
+end
+
+function get_label_id(model::Model, label::String)
+  model.label_ids[label]
 end

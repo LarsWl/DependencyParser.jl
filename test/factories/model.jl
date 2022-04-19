@@ -30,3 +30,58 @@ function build_model(settings::Settings)
 
   Model(embeddings, hidden_layer, output_layer, word_ids, tag_ids, label_ids)
 end
+
+function build_correct_batch(model::Model, config::Configuration)
+  stack = config.stack |> collect
+
+  Integer[
+    stack[begin] |> word_id -> model.word_ids[config.sentence.tokens[word_id].name],
+    stack[begin + 1] |> word_id -> model.word_ids[config.sentence.tokens[word_id].name],
+    model.word_ids[ROOT_TOKEN],
+    config.buffer[begin] |> word_id -> model.word_ids[config.sentence.tokens[word_id].name],
+    config.buffer[begin + 1] |> word_id -> model.word_ids[config.sentence.tokens[word_id].name],
+    config.buffer[begin + 2] |> word_id -> model.word_ids[config.sentence.tokens[word_id].name],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[config.sentence.tokens[1].name],
+    model.word_ids[config.sentence.tokens[3].name],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    model.word_ids[NULL_TOKEN],
+    stack[begin] |> word_id -> model.tag_ids[config.sentence.pos_tags[word_id].name],
+    stack[begin + 1] |> word_id -> model.tag_ids[config.sentence.pos_tags[word_id].name],
+    model.tag_ids[ROOT_TOKEN],
+    config.buffer[begin] |> word_id -> model.tag_ids[config.sentence.pos_tags[word_id].name],
+    config.buffer[begin + 1] |> word_id -> model.tag_ids[config.sentence.pos_tags[word_id].name],
+    config.buffer[begin + 2] |> word_id -> model.tag_ids[config.sentence.pos_tags[word_id].name],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[config.sentence.pos_tags[1].name],
+    model.tag_ids[config.sentence.pos_tags[3].name],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.tag_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids["SBJ"],
+    model.label_ids["IOBJ"],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+    model.label_ids[NULL_TOKEN],
+  ]
+end

@@ -45,9 +45,6 @@ using DependencyParser.DependencyParsing.ArcEager
     @testset "Validation" begin
       config = build_configuration()
       @test is_valid(config, reduce)
-      config.buffer = Vector{Integer}()
-      @test is_valid(config, reduce) == false
-      config = build_configuration()
       config.stack = Stack{Integer}()
       @test is_valid(config, reduce) == false
     end
@@ -110,7 +107,7 @@ using DependencyParser.DependencyParsing.ArcEager
     @testset "Cost" begin
       config = build_configuration()
       gold_state = build_updated_gold_state(config)
-      correct_cost = -1
+      correct_cost = 1
       @test cost(gold_state, right_arc, "SOME") == correct_cost
     end
   end
