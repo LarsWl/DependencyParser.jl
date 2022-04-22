@@ -1,14 +1,17 @@
 export TreeNode;
-export EMPTY_LABEL, EMPTY_NODE
+export EMPTY_LABEL, EMPTY_NODE, ROOT_TOKEN
 
+const ROOT_TOKEN = "-ROOT-"
 const EMPTY_LABEL = "EMPTY_LABEL"
-const EMPTY_NODE = -1
+const EMPTY_NODE = -1 
 
 mutable struct TreeNode
   word_id::Integer
   label::String
   head_id::Integer
+  token::String
 
-  TreeNode(word_id::Integer) = new(word_id, EMPTY_LABEL, EMPTY_NODE)
+  TreeNode(word_id::Integer) = new(word_id, EMPTY_LABEL, EMPTY_NODE, ROOT_TOKEN)
+  TreeNode(word_id::Integer, token::String) = new(word_id, EMPTY_LABEL, EMPTY_NODE, token)
   TreeNode(word_id::Integer, label::String, head_id::Integer) = new(word_id, label, head_id)
 end

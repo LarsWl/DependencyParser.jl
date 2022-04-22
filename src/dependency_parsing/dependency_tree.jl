@@ -10,7 +10,7 @@ mutable struct DependencyTree
   DependencyTree(root::TreeNode, nodes::Vector{TreeNode}, length::Integer) = new(root, nodes, length)
   function DependencyTree(sentence::Sentence)
     nodes = map(collect(1:sentence.length)) do index
-      TreeNode(index)
+      TreeNode(index, sentence.tokens[index].name)
     end
 
     root = TreeNode(0)
@@ -89,4 +89,18 @@ function get_right_child(tree::DependencyTree, word_id::Integer; child_number = 
   end
 
   NONEXIST_TOKEN
+end
+
+function write_to_file!(tree::DependencyTree, filename::String)
+  open(filename, "w") do file
+    foreach(enumerate(tree.nodes)) do (index, node)
+      head_word = if node.head_id == 0
+        tree.root.token
+      elseif node.head_id > 0
+        tree.nodes[node.head_id].token
+      else
+        
+      end
+    end
+  end
 end

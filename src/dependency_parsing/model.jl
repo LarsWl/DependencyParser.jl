@@ -1,11 +1,13 @@
 export Model
-export write_to_file!, predict, loss_function, update_model!
+export write_to_file!, predict, loss_function, update_model!, update_model!_2
 
 import .ArcEager: transitions_number, set_labels!, execute_transition, zero_cost_transitions, transition_costs
-import .ArcEager: GoldState
+import .ArcEager: GoldState, FORBIDDEN_COST
 
 using Flux
+using Zygote
 using JLD2
+import LinearAlgebra: norm
 
 #=
   Input layer dimension: batch_size * embeddings_size
@@ -14,16 +16,17 @@ using JLD2
   output layer weights dimensions: labels_num * hidden_size
 =#
 mutable struct Model
-  embeddings::Matrix{Float32}
+  embeddings::Matrix{Float64}
   hidden_layer::Dense
   output_layer::Dense
   chain::Chain
   word_ids::Dict{String, Integer}
   tag_ids::Dict{String, Integer}
   label_ids::Dict{String, Integer}
+  optimizer
 
   function Model(
-    embeddings::Matrix{Float32},
+    embeddings::Matrix{Float64},
     hidden_layer::Dense,
     output_layer::Dense,
     word_ids::Dict{String, Integer},
@@ -49,7 +52,7 @@ mutable struct Model
     set_corpus_data!(model, connlu_sentences)
     set_labels!(system, model.label_ids |> keys |> collect)
 
-    model.embeddings = rand(Float32, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
+    model.embeddings = rand(Float64, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
@@ -68,12 +71,12 @@ mutable struct Model
     word_ids = Dict{String, Integer}()
     tag_ids = Dict{String, Integer}()
     label_ids = Dict{String, Integer}()
-    embeddings = Matrix{Float32}(undef, total_ids_count, embeddings_size)
+    embeddings = Matrix{Float64}(undef, total_ids_count, embeddings_size)
 
     # read all embeddings for words, tags and labels
     for i = 1:total_ids_count
       line = lines[i + 1]
-      entity, embedding = split(line) |> values -> [values[begin], map(value -> parse(Float32, value), values[begin+1:end])]
+      entity, embedding = split(line) |> values -> [values[begin], map(value -> parse(Float64, value), values[begin+1:end])]
       embeddings[i, :] = embedding
 
       # Depend on index define entity as word or as tag or as label
@@ -89,21 +92,21 @@ mutable struct Model
     info_line = lines[total_ids_count + 2]
     batch_size, hidden_size, labels_num = split(info_line) |> info_values -> map(value -> parse(Int32, value), info_values)
 
-    hidden_layer = Matrix{Float32}(undef, hidden_size, batch_size * embeddings_size)
-    output_layer = Matrix{Float32}(undef, labels_num, hidden_size)
+    hidden_layer = Matrix{Float64}(undef, hidden_size, batch_size * embeddings_size)
+    output_layer = Matrix{Float64}(undef, labels_num, hidden_size)
 
     # read hidden layer weights and bias
     for i = 1:hidden_size
       line = lines[i + total_ids_count + 2]
-      hidden_layer[i, :] = split(line) |> values -> map(value -> parse(Float32, value), values)
+      hidden_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
     end
     hidden_bias_line = lines[begin + total_ids_count + hidden_size + 2]
-    hidden_bias = split(hidden_bias_line) |> values -> map(value -> parse(Float32, value), values)
+    hidden_bias = split(hidden_bias_line) |> values -> map(value -> parse(Float64, value), values)
 
     # read softmax layer weights
     for i = 1:labels_num
       line = lines[i + total_ids_count + hidden_size + 3]
-      output_layer[i, :] = split(line) |> values -> map(value -> parse(Float32, value), values)
+      output_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
     end
 
     model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), Chain(), word_ids, tag_ids, label_ids)
@@ -113,27 +116,16 @@ mutable struct Model
   end
 end
 
-function cache_data(func::Function, filename::String, path::String, args...; kwargs...)
-  local prepared = nothing
-  if isfile(filename)
-    jldopen(filename, "r") do file
-      if haskey(file, path)
-        prepared = file[path]
-      end
-    end
-  end
-  if isnothing(prepared)
-    prepared = func(args...; kwargs...)
-    jldopen(filename, "a+") do file
-      file[path] = prepared
-    end
-  end
-  return prepared
+function form_chain(model::Model)
+  Chain(
+    input -> calculate_hidden(model, input) .^ 3,
+    model.output_layer,
+    softmax
+  )
 end
 
-function form_chain(model::Model)
-  hidden_layer_calculation = function (input::Vector{Integer})
-    result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
+function calculate_hidden(model, input::Vector{Integer})
+  result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
     batch_size = length(input)
     embeddings_size = length(model.embeddings[begin, :])
 
@@ -142,38 +134,80 @@ function form_chain(model::Model)
       offset = (i - 1) * embeddings_size
       W_slice = model.hidden_layer.weight[:, (offset + 1) : (offset + embeddings_size)]
 
-      result += (W_slice * x + model.hidden_layer.bias) .^ 3
+      result += (W_slice * x + model.hidden_layer.bias)
     end
 
     result
-  end
-
-  Chain(
-    hidden_layer_calculation,
-    model.output_layer,
-    softmax
-  )
 end
 
 function predict(model::Model, batch::Vector{Integer})
   model.chain(batch)
 end
 
-function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
-  loss(x, y) = loss_function(model, x, y)
-
-  params = Flux.params(model.embeddings, model.hidden_layer.weight, model.output_layer.weight)
-  opt = Flux.ADAGrad()
-
-  Flux.train!(loss, params, [(batch, gold)], opt)
+function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
+  form_batch(model, settings, config) |> 
+    batch -> predict(model, batch) |>
+    findmax |>
+    max_score_wiht_index -> system.transitions[max_score_wiht_index[end]]
 end
 
-function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float32})
-  Flux.Losses.crossentropy(predict(model, batch), gold)
+function update_model_by_corenlp!(model::Model, batch::Vector{Integer}, costs::Vector{Int64})
+  grads = take_gradient(model, batch, costs)
+  gold = map(costs) do cost 
+    if cost == FORBIDDEN_COST
+      -1
+    elseif cost <= 0
+      1
+    else
+      0
+    end
+  end |> softmax
+  
+  Flux.update!(model.optimizer, grads.params, grads)
+
+  println("LOSS: $(loss_function(model, batch, gold, grads.params))")
 end
 
-function train!(model::Model, settings::Settings, connlu_sentences::Vector{ConnluSentence})
+function update_model!(model::Model, batch::Vector{Integer}, costs::Vector{Int64})
+  gold = map(costs) do cost 
+    if cost == FORBIDDEN_COST
+      -1
+    elseif cost <= 0
+      1
+    else
+      0
+    end
+  end |> softmax
+
+  params = Flux.params([
+    model.embeddings,
+    model.hidden_layer.weight,
+    model.hidden_layer.bias,
+    model.output_layer.weight
+  ])
+  loss(x, y) = loss_function(model, x, y, params)
+  
+  Flux.train!(loss, params, [(batch, gold)], model.optimizer)
+
+  println("LOSS: $(loss_function(model, batch, gold, params))")
+end
+
+function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float64}, params)
+  chain = Chain(
+    input -> calculate_hidden(model, input) .^ 3,
+    model.output_layer,
+  )
+  scores = chain(batch)
+  reg_weight = 1e-7
+
+  sqnorm(x) = sum(abs2, x)
+
+  Flux.Losses.logitcrossentropy(scores, gold) + sum(sqnorm, params) * (reg_weight / 2)
+end
+
+function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_sentences::Vector{ConnluSentence})
   iterations = 10
+  model.optimizer = ADAM()
 
   for i = 1:iterations
     for connlu_sentence in connlu_sentences
@@ -186,18 +220,17 @@ function train!(model::Model, settings::Settings, connlu_sentences::Vector{Connl
       while !is_terminal(config)
         gold_state = GoldState(connlu_sentence.gold_tree, config, system)
 
-        predicted_transition = predict_transition(parser, config)
+        predicted_transition = predict_transition(model, settings, system, config)
         zero_transitions = zero_cost_transitions(gold_state)
 
         if !(predicted_transition in zero_transitions)
           batch = form_batch(model, settings, config)
-          gold = transition_costs(gold_state) |> softmax
+          costs = transition_costs(gold_state)
 
-          update_model!(model, batch, gold)
-
-          println("LOSS: $(loss_function(model, batch, gold))")
+          update_model!(model, batch, costs)
         end
 
+        length(zero_transitions) == 0 && continue
         transition = rand(zero_transitions)
 
         execute_transition(config, transition, system)
@@ -221,8 +254,13 @@ function write_to_file!(model::Model, filename::String)
   open(filename, "w") do file
     embeddings_size = length(model.embeddings[begin, :])
 
+    sort_by_value(pair) = pair[end]
     write(file, "$(length(model.word_ids)) $(length(model.tag_ids)) $(length(model.label_ids)) $(embeddings_size)\n")
-    known_entities = vcat(collect(model.word_ids), collect(model.tag_ids), collect(model.label_ids))
+    known_entities = vcat(
+      sort(collect(model.word_ids), by = sort_by_value),
+      sort(collect(model.tag_ids), by = sort_by_value),
+      sort(collect(model.label_ids), by = sort_by_value)
+    )
 
     foreach(known_entities) do (entity, entity_id)
       embedding = model.embeddings[entity_id, :]
@@ -255,7 +293,7 @@ function read_embeddings_file(filename::String)
   words_count, dimension = split(lines[begin]) |> (numbers -> map(number -> parse(Int64, number), numbers))
   deleteat!(lines, 1)
 
-  embeddings = zeros(Float32, words_count, dimension)
+  embeddings = zeros(Float64, words_count, dimension)
   embedding_ids = Dict{String, Integer}()
 
   foreach(enumerate(lines)) do (index, line)
@@ -264,14 +302,14 @@ function read_embeddings_file(filename::String)
     embedding_ids[string(word)] = index
 
     for i = 1:dimension
-      embeddings[index, i] = parse(Float32, splitted[i + 1])
+      embeddings[index, i] = parse(Float64, splitted[i + 1])
     end
   end
 
   [embeddings, embedding_ids]
 end
 
-function match_embeddings!(embeddings::Matrix{Float32}, loaded_embeddings::Matrix{Float32}, embedding_ids::Dict{String, Integer}, known_words::Vector{String})
+function match_embeddings!(embeddings::Matrix{Float64}, loaded_embeddings::Matrix{Float64}, embedding_ids::Dict{String, Integer}, known_words::Vector{String})
   foreach(enumerate(known_words)) do (index, word)
     embedding_id = if haskey(embedding_ids, word)
       embedding_ids[word]
@@ -389,4 +427,80 @@ end
 
 function get_label_id(model::Model, label::String)
   model.label_ids[label]
+end
+
+function take_gradient(model, batch, costs)
+  sum1 = 0.0
+  sum2 = 0.0
+  hidden = calculate_hidden(model, batch)
+  cube_hidden = hidden .^ 3
+  scores = model.output_layer(cube_hidden)
+  max_score = findmax(scores)[begin]
+  norm_coef = 1e6
+  reg_weight = 1e-8
+  gold = map(costs) do cost 
+    if cost == FORBIDDEN_COST
+      -1
+    elseif cost <= 0
+      1
+    else
+      0
+    end
+  end
+
+  hidden_weight_grad = zeros(Float64, size(model.hidden_layer.weight))
+  hidden_bias_grad = zeros(Float64, size(model.hidden_layer.bias))
+  output_weight_grad = zeros(Float64, size(model.output_layer.weight))
+  embeddings_grad = zeros(Float64, size(model.embeddings))
+
+  cube_hidden_grad = zeros(Float64, size(cube_hidden))
+  
+  foreach(enumerate(costs)) do (index, cost)
+    if cost != FORBIDDEN_COST
+      scores[index] = exp(scores[index] - max_score)
+      if cost <= 0
+        sum1 += scores[index]
+      end
+      sum2 += scores[index]
+    end
+  end
+
+  for index = 1:length(costs)
+    if costs[index] != FORBIDDEN_COST
+      delta = -(gold[index] - scores[index] / sum2) / norm_coef;
+      
+      output_weight_grad[index, :] += (cube_hidden .* delta)
+      output_weight_grad[index, :] += output_weight_grad[index, :] .* reg_weight
+      cube_hidden_grad += (delta .* model.output_layer.weight[index, :])
+    end
+  end
+
+  hidden_bias_grad = cube_hidden_grad .* 3  + (hidden .^ 2);
+  hidden_bias_grad += hidden_bias_grad .* reg_weight
+
+  foreach(enumerate(batch)) do (index, feature)
+    embedding = model.embeddings[feature, :]
+    embeddings_size = length(embedding)
+    offset = (index - 1) * embeddings_size
+
+    for node_index = 1:length(hidden)
+      hidden_weight_grad[node_index, (offset + 1) : (offset + embeddings_size)] += embedding .* hidden_bias_grad[node_index]
+      embeddings_grad[feature, :] += model.hidden_layer.weight[node_index, (offset + 1) : (offset + embeddings_size)] .* hidden_bias_grad[node_index]
+    end
+  end
+
+  hidden_weight_grad += hidden_weight_grad .* reg_weight
+  embeddings_grad += embeddings_grad .* reg_weight
+
+  params = Flux.params(model.embeddings, model.hidden_layer.weight, model.output_layer.weight, model.hidden_layer.bias)
+
+  Zygote.Grads(
+    IdDict(
+      model.embeddings => embeddings_grad,
+      model.hidden_layer.weight => hidden_weight_grad,
+      model.hidden_layer.bias => hidden_bias_grad,
+      model.output_layer.weight => output_weight_grad
+    ),
+    params
+  )
 end

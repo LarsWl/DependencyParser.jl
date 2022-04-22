@@ -23,8 +23,8 @@ function build_model(settings::Settings)
     DependencyParser.DependencyParsing.NULL_TOKEN => 15
   )
 
-  embeddings = rand(Float32, 15, settings.embeddings_size)
-  hidden_bias = rand(Float32, settings.hidden_size)
+  embeddings = rand(Float64, 15, settings.embeddings_size)
+  hidden_bias = rand(Float64, settings.hidden_size)
   hidden_layer = Dense(settings.embeddings_size * settings.batch_size, settings.hidden_size, bias=hidden_bias)
   output_layer = Dense(settings.hidden_size, 10)
 

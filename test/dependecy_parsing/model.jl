@@ -70,14 +70,14 @@ using DependencyParser.DependencyParsing
     word_pair = Pair{String, Integer}("here", 1)
     tag_pair = Pair{String, Integer}("TAG2", 7)
     label_pair = Pair{String, Integer}("LABEL2", 13)
-    word_embedding = Float32[1, 2, 3, 4]
-    tag_embedding = Float32[3, 2, 4, 1]
-    label_embedding = Float32[4, 2, 1, 3]
+    word_embedding = Float64[1, 2, 3, 4]
+    tag_embedding = Float64[3, 2, 4, 1]
+    label_embedding = Float64[4, 2, 1, 3]
     hidden_size = 2
     batch_size = 3
     labels_num = 10
-    hidden_layer_weight_vector = Float32[1,2,3,4,5,6,7,8,9,10,9,8]
-    hidden_layer_bias = Float32[1, 2]
+    hidden_layer_weight_vector = Float64[1,2,3,4,5,6,7,8,9,10,9,8]
+    hidden_layer_bias = Float64[1, 2]
     softmax_layer_weight_vector = [3, 4]
 
     @test length(model.word_ids) == 6
@@ -134,3 +134,62 @@ using DependencyParser.DependencyParsing
     @test form_batch(model, parser.settings, config) == correct_batch
   end
 end
+
+# Temp used for test
+
+# parser = build_dep_parser()
+# config = build_configuration()
+# gold_state = build_updated_gold_state(config, system=parser.parsing_system)
+# model = parser.model
+
+# batch = build_correct_batch(parser.model, config)
+# costs = ArcEager.transition_costs(gold_state)
+# gold = ArcEager.transition_costs(gold_state) |> gold -> map(c -> -c, gold) |> softmax
+
+# model.hidden_layer.weight
+# model.hidden_layer.bias
+
+# model.chain
+
+# params = Flux.params(model.chain)
+
+# params
+
+# loss_before_update = loss_function(model, batch, gold)
+# update_model!(model, batch, costs)
+# update_model!_2(model, batch, costs)
+
+# predict(model, batch)
+# gold
+
+
+# model_test = DependencyParser.DependencyParsing.Model("tmp/test5.txt")
+
+
+
+# words = ["He", "wrote", "her", "a", "letter", "."]
+# tags = ["PRP", "VBN", "PRP", "DT", "NN", "JJ"]
+
+# words_with_tags = zip(words, tags) |> collect
+
+# parser = DependencyParser.DependencyParsing.DepParser(DependencyParser.DependencyParsing.Settings(), model_test, DependencyParser.DependencyParsing.ArcEager.ArcEagerSystem())
+
+# sentence = DependencyParser.DependencyParsing.Sentence(words_with_tags)
+# config = DependencyParser.DependencyParsing.Configuration(sentence)
+
+# parser(words_with_tags)
+
+# batch = form_batch(parser.model, Settings(), config)
+# pr = DependencyParser.DependencyParsing.predict(parser.model, batch)
+# transition = predict_transition(parser, config)
+# execute_transition(parser, config, transition)
+# config
+
+# using TextAnalysis
+# using TextModels
+
+# text = StringDocument("Any use of the work other than as authorized under this license or copyright law is prohibited")
+# words = tokens(text)
+# pos = TextModels.PerceptronTagger(true)
+# words_with_tags = pos(words) |> words -> map(word -> (String(word[begin]), String(word[end])), words)
+# parser(words_with_tags)

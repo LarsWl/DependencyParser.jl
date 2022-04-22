@@ -3,4 +3,5 @@ module Core
   include("pos_tag.jl")
   include("sentence.jl")
   include("sequence.jl")
+  include("cache.jl")
 end

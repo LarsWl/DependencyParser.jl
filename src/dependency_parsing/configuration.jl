@@ -9,7 +9,6 @@ using DataStructures
 const NONEXIST_TOKEN = -1
 const UNKNOWN_TOKEN = "-UNKNOWN-"
 const NULL_TOKEN = "-NULL-"
-const ROOT_TOKEN = "-ROOT-"
 
 mutable struct Configuration
   buffer::Vector{Integer}
