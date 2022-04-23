@@ -163,7 +163,7 @@ end
 # gold
 
 
-# model_test = DependencyParser.DependencyParsing.Model("tmp/test5.txt")
+# model_test = DependencyParser.DependencyParsing.Model("tmp/test6.txt")
 
 
 

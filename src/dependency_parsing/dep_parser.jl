@@ -35,7 +35,7 @@ function (parser::DepParser)(tokens_with_tags)
   sentence = Sentence(tokens_with_tags)
   config = Configuration(sentence)
 
-  while !is_terminal(config)``
+  while !is_terminal(config)
     transition = predict_transition(parser, config)
     println(transition)
     execute_transition(parser, config, transition) || return config.tree
@@ -91,4 +91,4 @@ end
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)
-end
+endq

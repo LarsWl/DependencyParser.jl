@@ -93,14 +93,16 @@ end
 
 function write_to_file!(tree::DependencyTree, filename::String)
   open(filename, "w") do file
-    foreach(enumerate(tree.nodes)) do (index, node)
+    foreach(tree.nodes) do node
       head_word = if node.head_id == 0
         tree.root.token
       elseif node.head_id > 0
         tree.nodes[node.head_id].token
       else
-        
+        NO_HEAD
       end
+
+      node_line = "$(node.label)($(head_word)-$(node.head_id), $(node.token)-$(node.word_id)"
     end
   end
 end

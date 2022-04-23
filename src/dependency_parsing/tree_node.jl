@@ -1,7 +1,8 @@
 export TreeNode;
-export EMPTY_LABEL, EMPTY_NODE, ROOT_TOKEN
+export EMPTY_LABEL, EMPTY_NODE, ROOT_TOKEN, NO_HEAD
 
 const ROOT_TOKEN = "-ROOT-"
+const NO_HEAD = "-NO_HEAD-"
 const EMPTY_LABEL = "EMPTY_LABEL"
 const EMPTY_NODE = -1 
 

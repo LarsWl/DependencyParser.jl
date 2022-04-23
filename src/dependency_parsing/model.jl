@@ -1,7 +1,7 @@
 export Model
 export write_to_file!, predict, loss_function, update_model!, update_model!_2
 
-import .ArcEager: transitions_number, set_labels!, execute_transition, zero_cost_transitions, transition_costs
+import .ArcEager: transitions_number, set_labels!, execute_transition, zero_cost_transitions, transition_costs, gold_scores
 import .ArcEager: GoldState, FORBIDDEN_COST
 
 using Flux
@@ -124,20 +124,30 @@ function form_chain(model::Model)
   )
 end
 
-function calculate_hidden(model, input::Vector{Integer})
+function calculate_hidden(model, input::Vector{Integer}; dropout_active=false)
   result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
     batch_size = length(input)
     embeddings_size = length(model.embeddings[begin, :])
+    hidden_weight = Flux.dropout(model.hidden_layer.weight, 0.5, active = dropout_active, dims = 1)
 
     for i = 1:batch_size
       x = model.embeddings[input[i], :]
       offset = (i - 1) * embeddings_size
-      W_slice = model.hidden_layer.weight[:, (offset + 1) : (offset + embeddings_size)]
+      W_slice = hidden_weight[:, (offset + 1) : (offset + embeddings_size)]
 
       result += (W_slice * x + model.hidden_layer.bias)
     end
 
     result
+end
+
+function params!(model::Model)
+  Flux.params([
+    model.embeddings,
+    model.hidden_layer.weight,
+    model.hidden_layer.bias,
+    model.output_layer.weight
+  ])
 end
 
 function predict(model::Model, batch::Vector{Integer})
@@ -168,36 +178,20 @@ function update_model_by_corenlp!(model::Model, batch::Vector{Integer}, costs::V
   println("LOSS: $(loss_function(model, batch, gold, grads.params))")
 end
 
-function update_model!(model::Model, batch::Vector{Integer}, costs::Vector{Int64})
-  gold = map(costs) do cost 
-    if cost == FORBIDDEN_COST
-      -1
-    elseif cost <= 0
-      1
-    else
-      0
-    end
-  end |> softmax
 
-  params = Flux.params([
-    model.embeddings,
-    model.hidden_layer.weight,
-    model.hidden_layer.bias,
-    model.output_layer.weight
-  ])
-  loss(x, y) = loss_function(model, x, y, params)
+function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float64})
+  params = params!(model)
+  chain = Chain(
+    input -> calculate_hidden(model, input, dropout_active = true) .^ 3,
+    model.output_layer
+  )
+
+  loss(x, y) = loss_function(chain(x), y, params)
   
   Flux.train!(loss, params, [(batch, gold)], model.optimizer)
-
-  println("LOSS: $(loss_function(model, batch, gold, params))")
 end
 
-function loss_function(model::Model, batch::Vector{Integer}, gold::Vector{Float64}, params)
-  chain = Chain(
-    input -> calculate_hidden(model, input) .^ 3,
-    model.output_layer,
-  )
-  scores = chain(batch)
+function loss_function(scores::Vector{Float64}, gold::Vector{Float64}, params)
   reg_weight = 1e-7
 
   sqnorm(x) = sum(abs2, x)
@@ -225,9 +219,12 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
 
         if !(predicted_transition in zero_transitions)
           batch = form_batch(model, settings, config)
-          costs = transition_costs(gold_state)
+          gold  = transition_costs(gold_state) |> gold_scores
 
-          update_model!(model, batch, costs)
+          update_model!(model, batch, gold)
+
+          params = params!(model)
+          println("LOSS: $(loss_function(predict(model, batch), gold, params))")
         end
 
         length(zero_transitions) == 0 && continue
