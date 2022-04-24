@@ -154,6 +154,16 @@ function predict(model::Model, batch::Vector{Integer})
   model.chain(batch)
 end
 
+function predict_train(model::Model, batch::Vector{Integer})
+  chain = Chain(
+    input -> calculate_hidden(model, input, dropout_active = true) .^ 3,
+    model.output_layer
+  )
+
+  chain(batch)
+end
+
+
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
   form_batch(model, settings, config) |> 
     batch -> predict(model, batch) |>
@@ -161,53 +171,43 @@ function predict_transition(model::Model, settings::Settings, system::ParsingSys
     max_score_wiht_index -> system.transitions[max_score_wiht_index[end]]
 end
 
-function update_model_by_corenlp!(model::Model, batch::Vector{Integer}, costs::Vector{Int64})
-  grads = take_gradient(model, batch, costs)
-  gold = map(costs) do cost 
-    if cost == FORBIDDEN_COST
-      -1
-    elseif cost <= 0
-      1
-    else
-      0
-    end
-  end |> softmax
-  
-  Flux.update!(model.optimizer, grads.params, grads)
-
-  println("LOSS: $(loss_function(model, batch, gold, grads.params))")
-end
-
-
-function update_model!(model::Model, batch::Vector{Integer}, gold::Vector{Float64})
+function update_model!(model::Model, dataset, settings::Settings; cb = () -> ())
   params = params!(model)
-  chain = Chain(
-    input -> calculate_hidden(model, input, dropout_active = true) .^ 3,
-    model.output_layer
-  )
+  entropy_sum(sentence_sample) = sum(sentence_sample) do (batch, gold)
+    transition_loss(predict_train(model, batch), gold)
+  end
 
-  loss(x, y) = loss_function(chain(x), y, params)
+  loss(x) = loss_function(entropy_sum(x), params, settings)
   
-  Flux.train!(loss, params, [(batch, gold)], model.optimizer)
+  Flux.train!(loss, params, dataset, model.optimizer, cb=cb)
 end
 
-function loss_function(scores::Vector{Float64}, gold::Vector{Float64}, params)
-  reg_weight = 1e-7
-
+function loss_function(entropy_sum, params, settings::Settings)
   sqnorm(x) = sum(abs2, x)
+  
+  entropy_sum + sum(sqnorm, params) * (settings.reg_weight / 2)
+end
 
-  Flux.Losses.logitcrossentropy(scores, gold) + sum(sqnorm, params) * (reg_weight / 2)
+function transition_loss(scores::Vector{Float64}, gold::Vector{Float64})
+  Flux.Losses.logitcrossentropy(scores, gold)
+end
+
+function crossentropy_sum(prediction_func, sentence_sample...)
+  sum(sentence_sample) do (batch, gold)
+    transition_loss(prediction_func(batch), gold)
+  end
 end
 
 function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_sentences::Vector{ConnluSentence})
   iterations = 10
-  model.optimizer = ADAM()
+  model.optimizer = ADAGrad(0.01)
+  model_file = "tmp/test13.txt"
+  train_samples = []
 
   for i = 1:iterations
     for connlu_sentence in connlu_sentences
+      sentence_sample = []
       sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-
-      println("Предложение: $(connlu_sentence.string_doc.text)")
 
       config = Configuration(sentence)
 
@@ -216,25 +216,69 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
 
         predicted_transition = predict_transition(model, settings, system, config)
         zero_transitions = zero_cost_transitions(gold_state)
+        length(zero_transitions) == 0 && break
 
         if !(predicted_transition in zero_transitions)
           batch = form_batch(model, settings, config)
           gold  = transition_costs(gold_state) |> gold_scores
 
-          update_model!(model, batch, gold)
-
-          params = params!(model)
-          println("LOSS: $(loss_function(predict(model, batch), gold, params))")
+          push!(sentence_sample, (batch, gold))
         end
-
-        length(zero_transitions) == 0 && continue
+        
         transition = rand(zero_transitions)
 
         execute_transition(config, transition, system)
       end
+
+      push!(train_samples, (sentence_sample))
+
+      if length(train_samples) == settings.sample_size
+        update_model!(model, train_samples, settings, cb = () -> print_loss(model, rand(connlu_sentences), system))
+        write_to_file!(model, model_file)
+        train_samples = []
+      end
     end
   end
 end
+
+function print_loss(model::Model, connlu_sentence::ConnluSentence, system)
+  params = params!(model)
+  chain = Chain(
+    input -> calculate_hidden(model, input) .^ 3,
+    model.output_layer
+  )
+  sentence_sample = []
+
+  sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
+  config = Configuration(sentence)
+
+  while !is_terminal(config)
+    gold_state = GoldState(connlu_sentence.gold_tree, config, system)
+
+    predicted_transition = predict_transition(model, settings, system, config)
+    zero_transitions = zero_cost_transitions(gold_state)
+    length(zero_transitions) == 0 && break
+
+    if !(predicted_transition in zero_transitions)
+      batch = form_batch(model, settings, config)
+      gold  = transition_costs(gold_state) |> gold_scores
+
+      push!(sentence_sample, (batch, gold))
+    end
+    
+    transition = rand(zero_transitions)
+
+    execute_transition(config, transition, system)
+  end
+
+  entropy_sum = sum(sentence_sample) do (batch, gold)
+    transition_loss(chain(batch), gold)
+  end
+
+  println(loss_function(entropy_sum, params, settings))
+end
+
+
 
 #=
 File structure
@@ -429,11 +473,11 @@ end
 function take_gradient(model, batch, costs)
   sum1 = 0.0
   sum2 = 0.0
-  hidden = calculate_hidden(model, batch)
+  hidden = calculate_hidden(model, batch, dropout_active=true)
   cube_hidden = hidden .^ 3
   scores = model.output_layer(cube_hidden)
   max_score = findmax(scores)[begin]
-  norm_coef = 1e6
+  norm_coef = 1e4
   reg_weight = 1e-8
   gold = map(costs) do cost 
     if cost == FORBIDDEN_COST
@@ -473,7 +517,6 @@ function take_gradient(model, batch, costs)
   end
 
   hidden_bias_grad = cube_hidden_grad .* 3  + (hidden .^ 2);
-  hidden_bias_grad += hidden_bias_grad .* reg_weight
 
   foreach(enumerate(batch)) do (index, feature)
     embedding = model.embeddings[feature, :]
@@ -486,10 +529,14 @@ function take_gradient(model, batch, costs)
     end
   end
 
-  hidden_weight_grad += hidden_weight_grad .* reg_weight
-  embeddings_grad += embeddings_grad .* reg_weight
+  
 
   params = Flux.params(model.embeddings, model.hidden_layer.weight, model.output_layer.weight, model.hidden_layer.bias)
+
+  output_weight_grad += output_weight_grad .* reg_weight
+  hidden_bias_grad += hidden_bias_grad .* reg_weight
+  hidden_weight_grad += hidden_weight_grad .* reg_weight
+  embeddings_grad += embeddings_grad .* reg_weight
 
   Zygote.Grads(
     IdDict(

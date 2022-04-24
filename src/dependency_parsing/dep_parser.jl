@@ -57,8 +57,6 @@ function train!(system::ParsingSystem, train_file::String, embeddings_file::Stri
   model = Model(settings, system, embeddings_file, connlu_sentences)
 
   train!(model, settings, system, connlu_sentences)
-
-  write_to_file!(model, model_file)
 end
 
 function train!(train_file::String, model::Model, system::ParsingSystem, model_file::String)
@@ -67,8 +65,6 @@ function train!(train_file::String, model::Model, system::ParsingSystem, model_f
   settings = Settings()
 
   train!(model, system, settings, connlu_sentences)
-
-  write_to_file!(model, model_file)
 end
 
 # Temp code for test
@@ -91,4 +87,4 @@ end
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)
-endq
+end

@@ -163,33 +163,33 @@ end
 # gold
 
 
-# model_test = DependencyParser.DependencyParsing.Model("tmp/test6.txt")
+model_test = DependencyParser.DependencyParsing.Model("tmp/test12.txt")
 
 
 
-# words = ["He", "wrote", "her", "a", "letter", "."]
-# tags = ["PRP", "VBN", "PRP", "DT", "NN", "JJ"]
+words = ["He", "wrote", "her", "a", "letter", "."]
+tags = ["PRP", "VBN", "PRP", "DT", "NN", "JJ"]
 
-# words_with_tags = zip(words, tags) |> collect
+words_with_tags = zip(words, tags) |> collect
 
-# parser = DependencyParser.DependencyParsing.DepParser(DependencyParser.DependencyParsing.Settings(), model_test, DependencyParser.DependencyParsing.ArcEager.ArcEagerSystem())
+parser = DependencyParser.DependencyParsing.DepParser(DependencyParser.DependencyParsing.Settings(), model_test, DependencyParser.DependencyParsing.ArcEager.ArcEagerSystem())
 
-# sentence = DependencyParser.DependencyParsing.Sentence(words_with_tags)
-# config = DependencyParser.DependencyParsing.Configuration(sentence)
+sentence = DependencyParser.DependencyParsing.Sentence(words_with_tags)
+config = DependencyParser.DependencyParsing.Configuration(sentence)
 
-# parser(words_with_tags)
+parser(words_with_tags)
 
-# batch = form_batch(parser.model, Settings(), config)
-# pr = DependencyParser.DependencyParsing.predict(parser.model, batch)
-# transition = predict_transition(parser, config)
-# execute_transition(parser, config, transition)
-# config
+batch = form_batch(parser.model, Settings(), config)
+pr = DependencyParser.DependencyParsing.predict(parser.model, batch)
+transition = predict_transition(parser, config)
+execute_transition(parser, config, transition)
+config
 
-# using TextAnalysis
-# using TextModels
+using TextAnalysis
+using TextModels
 
-# text = StringDocument("Any use of the work other than as authorized under this license or copyright law is prohibited")
-# words = tokens(text)
-# pos = TextModels.PerceptronTagger(true)
-# words_with_tags = pos(words) |> words -> map(word -> (String(word[begin]), String(word[end])), words)
-# parser(words_with_tags)
+text = StringDocument("Any use of the work other than as authorized under this license or copyright law is prohibited")
+words = tokens(text)
+pos = TextModels.PerceptronTagger(true)
+words_with_tags = pos(words) |> words -> map(word -> (String(word[begin]), String(word[end])), words)
+parser(words_with_tags)
