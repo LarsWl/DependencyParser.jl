@@ -177,7 +177,9 @@ function update_model!(model::Model, dataset, settings::Settings; cb = () -> ())
     transition_loss(predict_train(model, batch), gold)
   end
 
-  loss(x) = loss_function(entropy_sum(x), params, settings)
+  sqnorm(x) = sum(abs2, x)
+  loss(x, y) = predict_train(model, x) |>
+    scores -> transition_loss(scores, y) + sum(sqnorm, params) * (settings.reg_weight / 2)
   
   Flux.train!(loss, params, dataset, model.optimizer, cb=cb)
 end
@@ -206,7 +208,6 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
 
   for i = 1:iterations
     for connlu_sentence in connlu_sentences
-      sentence_sample = []
       sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
 
       config = Configuration(sentence)
@@ -222,20 +223,19 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
           batch = form_batch(model, settings, config)
           gold  = transition_costs(gold_state) |> gold_scores
 
-          push!(sentence_sample, (batch, gold))
+          push!(train_samples, (batch, gold))
+
+          if length(train_samples) == settings.sample_size
+            update_model!(model, train_samples, settings, cb = () -> println("train..."))
+            print_loss(model, rand(connlu_sentences), system)
+            write_to_file!(model, model_file)
+            train_samples = []
+          end
         end
         
         transition = rand(zero_transitions)
 
         execute_transition(config, transition, system)
-      end
-
-      push!(train_samples, (sentence_sample))
-
-      if length(train_samples) == settings.sample_size
-        update_model!(model, train_samples, settings, cb = () -> print_loss(model, rand(connlu_sentences), system))
-        write_to_file!(model, model_file)
-        train_samples = []
       end
     end
   end
