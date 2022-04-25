@@ -181,7 +181,7 @@ function update_model!(model::Model, dataset, settings::Settings; cb = () -> ())
   loss(x, y) = predict_train(model, x) |>
     scores -> transition_loss(scores, y) + sum(sqnorm, params) * (settings.reg_weight / 2)
   
-  Flux.train!(loss, params, dataset, model.optimizer, cb=cb)
+  Flux.@epochs 5 Flux.train!(loss, params, dataset, model.optimizer, cb=cb)
 end
 
 function loss_function(entropy_sum, params, settings::Settings)
@@ -194,17 +194,14 @@ function transition_loss(scores::Vector{Float64}, gold::Vector{Float64})
   Flux.Losses.logitcrossentropy(scores, gold)
 end
 
-function crossentropy_sum(prediction_func, sentence_sample...)
-  sum(sentence_sample) do (batch, gold)
-    transition_loss(prediction_func(batch), gold)
-  end
-end
-
 function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_sentences::Vector{ConnluSentence})
   iterations = 10
   model.optimizer = ADAGrad(0.01)
-  model_file = "tmp/test13.txt"
+  model_file = "tmp/test14.txt"
   train_samples = []
+
+  evalcb() = @show(test_loss(model, rand(connlu_sentences), system))
+  throttled_cb = Flux.throttle(evalcb, 10)
 
   for i = 1:iterations
     for connlu_sentence in connlu_sentences
@@ -226,8 +223,8 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
           push!(train_samples, (batch, gold))
 
           if length(train_samples) == settings.sample_size
-            update_model!(model, train_samples, settings, cb = () -> println("train..."))
-            print_loss(model, rand(connlu_sentences), system)
+            update_model!(model, train_samples, settings, cb = throttled_cb)
+            
             write_to_file!(model, model_file)
             train_samples = []
           end
@@ -241,7 +238,7 @@ function train!(model::Model, system::ParsingSystem, settings::Settings, connlu_
   end
 end
 
-function print_loss(model::Model, connlu_sentence::ConnluSentence, system)
+function test_loss(model::Model, connlu_sentence::ConnluSentence, system)
   params = params!(model)
   chain = Chain(
     input -> calculate_hidden(model, input) .^ 3,
@@ -275,7 +272,7 @@ function print_loss(model::Model, connlu_sentence::ConnluSentence, system)
     transition_loss(chain(batch), gold)
   end
 
-  println(loss_function(entropy_sum, params, settings))
+  loss_function(entropy_sum, params, settings)
 end
 
 
