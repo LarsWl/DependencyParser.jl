@@ -9,6 +9,7 @@ using DataStructures
 const NONEXIST_TOKEN = -1
 const UNKNOWN_TOKEN = "-UNKNOWN-"
 const NULL_TOKEN = "-NULL-"
+const LIMIT_TRANSITIONS_NUMBER = 300
 
 mutable struct Configuration
   buffer::Vector{Integer}

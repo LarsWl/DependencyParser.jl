@@ -59,31 +59,44 @@ function train!(system::ParsingSystem, train_file::String, embeddings_file::Stri
   train!(model, settings, system, connlu_sentences)
 end
 
-function train!(train_file::String, model::Model, system::ParsingSystem, model_file::String)
+function train!(train_file::String, test_file::String, results_file::String, model::Model, system::ParsingSystem, model_file::String)
   println("Parse train file...")
   connlu_sentences = load_connlu_file(train_file)
+  test_sentences = load_connlu_file(test_file)
   settings = Settings()
 
-  train!(model, system, settings, connlu_sentences)
+
+  training_context = TrainingContext(
+    system,
+    settings,
+    connlu_sentences,
+    test_sentences,
+    test_file,
+    results_file,
+    model_file
+  )
+
+  train!(model, training_context)
 end
 
 # Temp code for test
 
-# system = ArcEager.ArcEagerSystem()
-# train_file = "/Users/admin/education/materials/UD_English-ParTUT/en_partut-ud-train.conllu"
-# embeddings_file = "/Users/admin/education/materials/fastvec.vec"
-# model_file = "tmp/test6.txt"
+system = ArcEager.ArcEagerSystem()
+train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
+test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-test_2.conllu"
+embeddings_file = "F:\\ed_soft\\parser_materials\\wiki-news-300d-1M.vec"
+model_file = "tmp/model_b500_adagrad_c01.txt"
+results_file = "tmp/results_b500_adagrad_c01.txt"
 
-# connlu_sentences = load_connlu_file(train_file)
-# settings = Settings()
-# model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache_2", settings, system, embeddings_file, connlu_sentences)
+connlu_sentences = load_connlu_file(train_file)
+settings = Settings()
+model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache", settings, system, embeddings_file, connlu_sentences)
 
-# sort(collect(model.label_ids), by=pair->pair[end]) |>
-#       pairs -> map(pair -> pair[begin], pairs) |>
-#       labels -> set_labels!(system, labels)
+sort(collect(model.label_ids), by=pair->pair[end]) |>
+      pairs -> map(pair -> pair[begin], pairs) |>
+      labels -> set_labels!(system, labels)
 
-# train!(train_file, model, system,model_file)
-# write_to_file!(model, model_file)
+train!(train_file, test_file, results_file, model, system, model_file)
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)

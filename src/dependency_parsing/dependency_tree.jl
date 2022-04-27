@@ -91,18 +91,18 @@ function get_right_child(tree::DependencyTree, word_id::Integer; child_number = 
   NONEXIST_TOKEN
 end
 
-function write_to_file!(tree::DependencyTree, filename::String)
-  open(filename, "w") do file
-    foreach(tree.nodes) do node
-      head_word = if node.head_id == 0
-        tree.root.token
-      elseif node.head_id > 0
-        tree.nodes[node.head_id].token
-      else
-        NO_HEAD
-      end
-
-      node_line = "$(node.label)($(head_word)-$(node.head_id), $(node.token)-$(node.word_id)"
+function convert_to_string(tree::DependencyTree)
+  lines = map(tree.nodes) do node
+    head_word = if node.head_id == 0
+      tree.root.token
+    elseif node.head_id > 0
+      tree.nodes[node.head_id].token
+    else
+      NO_HEAD
     end
+
+    "$(node.label)($(head_word)-$(node.head_id), $(node.token)-$(node.word_id))"
   end
+
+  join(lines, "\n")
 end

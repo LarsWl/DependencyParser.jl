@@ -1,3 +1,0 @@
-struct Classifier
-  mo
-end
