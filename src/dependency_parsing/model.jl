@@ -8,7 +8,6 @@ using Flux, CUDA
 using Zygote
 using JLD2
 using DependencyParserTest
-import LinearAlgebra: norm
 
 #=
   Input layer dimension: batch_size * embeddings_size
@@ -16,6 +15,9 @@ import LinearAlgebra: norm
   bias dineansion: hidden_size
   output layer weights dimensions: labels_num * hidden_size
 =#
+
+CUDA.allowscalar(false)
+
 mutable struct Model
   embeddings
   hidden_layer::Dense
@@ -121,21 +123,18 @@ function calculate_hidden(model, input; dropout_active=false)
     result = cu(result)
   end
 
-  batch_size = length(input)
   embeddings_size = length(model.embeddings[begin, :])
+  batch_size = length(input)
   hidden_weight = Flux.dropout(model.hidden_layer.weight, 0.5, active = dropout_active, dims = 1)
 
-  CUDA.allowscalar() do
-    for i = 1:batch_size
-      x = model.embeddings[Integer(input[i]), :]
-      offset = (i - 1) * embeddings_size
-      W_slice = hidden_weight[:, (offset + 1) : (offset + embeddings_size)]
+  for i = 1:batch_size
+    offset = (i - 1) * embeddings_size
+    W_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
 
-      result += (W_slice * x + model.hidden_layer.bias)
-    end
+    result += (W_slice * input[i])
   end
 
-    result
+    result + model.hidden_layer.bias
 end
 
 function params!(model::Model)
@@ -166,7 +165,7 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
 end
 
 function predict_train(model::Model, batch)
-  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |> model.output_layer
+  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |> model.output_layer |> softmax
 end
 
 
@@ -179,21 +178,11 @@ end
 
 function update_model!(model::Model, dataset, training_context::TrainingContext; cb = () -> ())
   params = params!(model)
-  entropy_sum(sentence_sample) = sum(sentence_sample) do (batch, gold)
-    transition_loss(predict_train(model, batch), gold)
-  end
 
   loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(params, training_context.settings)
 
-  train_epoch = () -> begin
-    Flux.train!(loss, params, dataset, training_context.optimizer, cb=cb)
-
-    test_training_scores(model, training_context)
-  end
-  
-  Flux.@epochs 5 train_epoch()
+  Flux.train!(loss, params, dataset, training_context.optimizer, cb=cb)
 end
-
 
 function loss_function(entropy_sum, params, settings::Settings)
   entropy_sum + L2_norm(params, settings)
@@ -206,27 +195,29 @@ function L2_norm(params, settings::Settings)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.logitcrossentropy(scores, gold)
+  Flux.Losses.binary_focal_loss(scores, gold)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  iterations = 10
   training_context.optimizer = ADAGrad(0.01)
-  model_file = "tmp/test14.txt"
   train_samples = []
   model.gpu_available = CUDA.functional()
 
   if model.gpu_available
     println("enable cuda")
-    model.embeddings = cu(model.embeddings)
     model.hidden_layer = fmap(cu, model.hidden_layer)
     model.output_layer = fmap(cu, model.output_layer)
   end
 
-  evalcb() = @show(test_loss(model, rand(training_context.test_connlu_sentences), training_context))
+  evalcb = () -> begin
+    @show(test_loss(model, rand(training_context.test_connlu_sentences), training_context))
+    training_context.best_uas > 0.8 && Flux.stop!
+  end
+
   throttled_cb = Flux.throttle(evalcb, 10)
 
-  for i = 1:iterations
+  train_epoch = () -> begin
+    sentence_number = 0
     for connlu_sentence in training_context.connlu_sentences
       sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
       transitions_number = 0
@@ -264,8 +255,20 @@ function train!(model::Model, training_context::TrainingContext)
 
         transitions_number >= LIMIT_TRANSITIONS_NUMBER && break
       end
+      sentence_number += 1
+
+      if sentence_number % 100 == 0
+        println("Sentences processed: $(sentence_number)")
+      end
+
+      if sentence_number % 500 == 0
+        println("Start test...")
+        test_training_scores(model, training_context)
+      end
     end
   end
+
+  Flux.@epochs 20 train_epoch()
 end
 
 function test_training_scores(model::Model, context::TrainingContext)
@@ -299,7 +302,7 @@ function test_training_scores(model::Model, context::TrainingContext)
     write(file, result_line)
   end
 
-  if uas > context.best_uas
+  if uas > context.best_uas || (uas == context.best_uas && las > context.best_las)
     context.best_uas = uas
     context.best_las = las
     context.best_loss = avg_loss
@@ -312,7 +315,8 @@ function test_loss(model::Model, connlu_sentence::ConnluSentence, training_conte
   params = params!(model)
   chain = Chain(
     input -> calculate_hidden(model, input) .^ 3,
-    model.output_layer
+    model.output_layer,
+    softmax
   )
   sentence_sample = []
 
@@ -368,6 +372,10 @@ hidden bias
 softmax weights
 =#
 function write_to_file!(model::Model, filename::String)
+  hidden_weight = model.hidden_layer.weight |> collect
+  hidden_bias = model.hidden_layer.bias |> collect
+  output_weight = model.output_layer.weight |> collect
+
   open(filename, "w") do file
     embeddings_size = length(model.embeddings[begin, :])
 
@@ -384,22 +392,22 @@ function write_to_file!(model::Model, filename::String)
       write(file, "$(entity) $(join(embedding, " "))\n")
     end
 
-    hidden_size = length(model.hidden_layer.weight[:, begin])
-    labels_num = length(model.output_layer.weight[:, begin])
-    batch_size = Int32(length(model.hidden_layer.weight[begin, :]) / embeddings_size)
+    hidden_size = length(hidden_weight[:, begin])
+    labels_num = length(output_weight[:, begin])
+    batch_size = Int32(length(hidden_weight[begin, :]) / embeddings_size)
 
     write(file, "$(batch_size) $(hidden_size) $(labels_num)\n")
 
     for i = 1:hidden_size
-      write(file, join(model.hidden_layer.weight[i, :], " "))
+      write(file, join(hidden_weight[i, :], " "))
       write(file, "\n")
     end
 
-    write(file, join(model.hidden_layer.bias, " "))
+    write(file, join(hidden_bias, " "))
     write(file, "\n")
 
     for i = 1:labels_num
-      write(file, join(model.output_layer.weight[i, :], " "))
+      write(file, join(output_weight[i, :], " "))
       write(file, "\n")
     end
   end
@@ -493,6 +501,7 @@ function form_batch(model::Model, settings::Settings, config::Configuration)
   word_id_by_word_index(word_index::Integer) = get_token(config, word_index) |> token -> get_word_id(model, token)
   tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(model, tag)
   label_id_by_word_index(word_index::Integer) = get_label(config, word_index) |> label -> get_label_id(model, label)
+  take_embedding(word_index::Integer) = model.embeddings[word_index, :]
 
   # add top three stack elements and top three buffers elems with their's tags
   for i = 1:3
@@ -531,114 +540,14 @@ function form_batch(model::Model, settings::Settings, config::Configuration)
       word_index -> set_word_data_by_index_with_offset(word_index, 6)
   end
   
+  batch = map(take_embedding, batch)
+  
   if model.gpu_available
-    cuda_batch = CUDA.zeros(settings.batch_size)
-    CUDA.allowscalar() do
-      copyto!(cuda_batch, view(batch, :))
-    end
+    map(cu, batch)
   else
     batch
   end
 end
-
-# function form_batch(model::Model, settings::Settings, config::Configuration)
-#   word_id_by_word_index(word_index::Integer) = get_token(config, word_index) |> token -> get_word_id(model, token)
-#   tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(model, tag)
-#   label_id_by_word_index(word_index::Integer) = get_label(config, word_index) |> label -> get_label_id(model, label)
-
-#   cu([
-#     get_stack_element(config, 1) |> word_id_by_word_index,
-#     get_stack_element(config, 2) |> word_id_by_word_index,
-#     get_stack_element(config, 3) |> word_id_by_word_index,
-#     get_buffer_element(config, 1) |> word_id_by_word_index,
-#     get_buffer_element(config, 2) |> word_id_by_word_index,
-#     get_buffer_element(config, 3) |> word_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> word_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> word_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> word_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> word_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       word_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       word_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> word_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> word_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> word_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> word_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       word_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       word_id_by_word_index,
-#     get_stack_element(config, 1) |> tag_id_by_word_index,
-#     get_stack_element(config, 2) |> tag_id_by_word_index,
-#     get_stack_element(config, 3) |> tag_id_by_word_index,
-#     get_buffer_element(config, 1) |> tag_id_by_word_index,
-#     get_buffer_element(config, 2) |> tag_id_by_word_index,
-#     get_buffer_element(config, 3) |> tag_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> tag_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> tag_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> tag_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> tag_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       tag_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       tag_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> tag_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> tag_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> tag_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> tag_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       tag_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       tag_id_by_word_index,
-#     get_stack_element(config, 1) |> label_id_by_word_index,
-#     get_stack_element(config, 2) |> label_id_by_word_index,
-#     get_stack_element(config, 3) |> label_id_by_word_index,
-#     get_buffer_element(config, 1) |> label_id_by_word_index,
-#     get_buffer_element(config, 2) |> label_id_by_word_index,
-#     get_buffer_element(config, 3) |> label_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> label_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> label_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> label_id_by_word_index,
-#     get_stack_element(config, 1) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> label_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       label_id_by_word_index,
-#     get_stack_element(config, 1) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       label_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index) |> label_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index) |> label_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_left_child(config.tree, stack_word_index, child_number=2) |> label_id_by_word_index,
-#     get_stack_element(config, 2) |> stack_word_index -> get_right_child(config.tree, stack_word_index, child_number=2) |> label_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_left_child(config.tree, stack_word_index) |> 
-#       word_index -> get_left_child(config.tree, word_index) |> 
-#       label_id_by_word_index,
-#     get_stack_element(config, 2) |> 
-#       stack_word_index -> get_right_child(config.tree, stack_word_index) |> 
-#       word_index -> get_right_child(config.tree, word_index) |> 
-#       label_id_by_word_index,
-#   ])
-# end
 
 function get_word_id(model::Model, word::String)
   haskey(model.word_ids, word) ? model.word_ids[word] : model.word_ids[UNKNOWN_TOKEN]

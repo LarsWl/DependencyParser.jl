@@ -83,10 +83,10 @@ end
 
 system = ArcEager.ArcEagerSystem()
 train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
-test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-test_2.conllu"
+test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
 embeddings_file = "F:\\ed_soft\\parser_materials\\wiki-news-300d-1M.vec"
-model_file = "tmp/model_b500_adagrad_c01.txt"
-results_file = "tmp/results_b500_adagrad_c01.txt"
+model_file = "tmp/model_b5000_adagrad_c01_bfl.txt"
+results_file = "tmp/results_b5000_adagrad_c01_bfl.txt"
 
 connlu_sentences = load_connlu_file(train_file)
 settings = Settings()
@@ -97,6 +97,9 @@ sort(collect(model.label_ids), by=pair->pair[end]) |>
       labels -> set_labels!(system, labels)
 
 train!(train_file, test_file, results_file, model, system, model_file)
+
+write_to_file!(model, model_file)
+
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)

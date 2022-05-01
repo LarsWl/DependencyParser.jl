@@ -21,7 +21,7 @@ end
 function convert(sentence_data)
   root = TreeNode(0)
   lines = split(sentence_data, "\n")
-  words = filter(word -> (length(word) > 1) && !(occursin(r"(text = )|(\d+-\d+)", word)), lines) .|> 
+  words = filter(word -> (length(word) > 1) && !(occursin(r"# |(\d+-\d+)", word)), lines) .|> 
       (word -> split(word, r"\t")) |>
       (words -> map(word -> [word[1], word[2], word[4], word[7], word[8]], words))
 
