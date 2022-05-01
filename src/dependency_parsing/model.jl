@@ -217,58 +217,64 @@ function train!(model::Model, training_context::TrainingContext)
   throttled_cb = Flux.throttle(evalcb, 10)
 
   train_epoch = () -> begin
-    sentence_number = 0
-    for connlu_sentence in training_context.connlu_sentences
-      sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-      transitions_number = 0
-      config = Configuration(sentence)
-
-      while !is_terminal(config)
-        gold_state = GoldState(connlu_sentence.gold_tree, config, training_context.system)
-
-        predicted_transition = predict_transition(model, training_context.settings, training_context.system, config)
-        zero_transitions = zero_cost_transitions(gold_state)
-        length(zero_transitions) == 0 && break
-
-        if !(predicted_transition in zero_transitions)
-          batch = form_batch(model, training_context.settings, config)
-          gold  = transition_costs(gold_state) |> gold_scores
-
-          if model.gpu_available
-            gold = cu(gold)
-          end
-
-          push!(train_samples, (batch, gold))
-
-          if length(train_samples) == training_context.settings.sample_size
-            update_model!(model, train_samples, training_context, cb = throttled_cb)
-            
-            train_samples = []
-          end
-        end
-        
-        transition = rand(zero_transitions)
-
-        execute_transition(config, transition, system)
-        
-        transitions_number += 1
-
-        transitions_number >= LIMIT_TRANSITIONS_NUMBER && break
-      end
-      sentence_number += 1
-
-      if sentence_number % 100 == 0
-        println("Sentences processed: $(sentence_number)")
-      end
-
-      if sentence_number % 500 == 0
-        println("Start test...")
-        test_training_scores(model, training_context)
-      end
-    end
+    train_samples = build_dataset(model, training_context)
+    grads = take_grads(train_samples, training_context)
   end
 
   Flux.@epochs 20 train_epoch()
+end
+
+function take_grads(dataset, context)
+  thread_pool_size = round(length(dataset) / context.settings.threads_count, RoundDown) |> Integer
+
+  Threads.@threads for i in 1:context.settings.threads_count
+    offset = (i - 1) * thread_pool_size
+
+    thread_dataset = Flux.DataLoader(dataset[(offset + 1):(offset + thread_pool_size)], batchsize=context.sample_size)
+
+    
+  end
+end
+
+function build_dataset(model, training_context)
+  train_samples = []
+
+  for connlu_sentence in training_context.connlu_sentences
+    sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
+    transitions_number = 0
+    config = Configuration(sentence)
+
+    while !is_terminal(config)
+      gold_state = GoldState(connlu_sentence.gold_tree, config, training_context.system)
+
+      predicted_transition = predict_transition(model, training_context.settings, training_context.system, config)
+      zero_transitions = zero_cost_transitions(gold_state)
+      length(zero_transitions) == 0 && break
+
+      if !(predicted_transition in zero_transitions)
+        batch = form_batch(model, training_context.settings, config)
+        gold  = transition_costs(gold_state) |> gold_scores
+
+        if model.gpu_available
+          gold = cu(gold)
+        end
+
+        push!(train_samples, (batch, gold))
+      end
+      
+      transition = rand(zero_transitions)
+      execute_transition(config, transition, system)
+      transitions_number += 1
+      transitions_number >= LIMIT_TRANSITIONS_NUMBER && break
+    end
+    sentence_number += 1
+
+    if sentence_number % 100 == 0
+      println("Sentences processed: $(sentence_number)")
+    end
+  end
+
+  train_samples
 end
 
 function test_training_scores(model::Model, context::TrainingContext)

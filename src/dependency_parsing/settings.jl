@@ -6,6 +6,7 @@ struct Settings
   batch_size::Integer
   reg_weight::Float64
   sample_size::Integer
+  threads_count::Integer
 
   Settings(;
     embeddings_size::Integer=300,
