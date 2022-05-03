@@ -84,13 +84,13 @@ function default_train()
   system = ArcEager.ArcEagerSystem()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
-  embeddings_file = "F:\\ed_soft\\parser_materials\\wiki-news-300d-1M.vec"
-  model_file = "tmp/model_b15000_adagrad_c01_bfl_3.txt"
-  results_file = "tmp/results_b15000_adagrad_c01_fl_3.txt"
+  embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
+  model_file = "tmp/model_b20000(1000)_adagrad_c01_bfl_e100.txt"
+  results_file = "tmp/results_b20000(1000)_adagrad_c01_bfl_e100.txt"
 
   connlu_sentences = load_connlu_file(train_file)
-  settings = Settings()
-  model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache", settings, system, embeddings_file, connlu_sentences)
+  settings = Settings(embeddings_size=100)
+  model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache_e50", settings, system, embeddings_file, connlu_sentences)
 
   sort(collect(model.label_ids), by=pair->pair[end]) |>
         pairs -> map(pair -> pair[begin], pairs) |>

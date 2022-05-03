@@ -119,31 +119,22 @@ end
 
 function calculate_hidden(model, input; dropout_active=false)
   result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
+  if model.gpu_available
+    result = cu(result)
+  end
 
   embeddings_size = length(model.embeddings[begin, :])
   batch_size = length(input)
+  hidden_weight = Flux.dropout(model.hidden_layer.weight, 0.5, active = dropout_active, dims = 1)
 
-  # hidden_weight = Flux.dropout(model.hidden_layer.weight, 0.5, active = dropout_active, dims = 1)
-  mask = if dropout_active
-    [rand(0:1) for i in size(model.hidden_layer.weight)[begin]]
-  else
-    ones(size(model.hidden_layer.weight)[begin])
-  end
-
-  if model.gpu_available
-    result = cu(result)
-    mask = cu(mask)
-  end
-
-  for i = 1:batch_size
+  for i in 1:batch_size
     offset = (i - 1) * embeddings_size
-    result .+= view(model.hidden_layer.weight, :, (offset + 1) : (offset + embeddings_size)) .* mask * input[i]
+    hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
+    
+    result += hidden_slice * input[i]
   end
 
-  result .+= model.hidden_layer.bias
-
-  CUDA.unsafe_free!(mask)
-  #CUDA.unsafe_free!(hidden_weight)
+  result += model.hidden_layer.bias
 
   result
 end
@@ -176,11 +167,9 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
 end
 
 function predict_train(model::Model, batch)
-  result = (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
+  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
     model.output_layer |>
     softmax
-
-  result
 end
 
 
@@ -197,11 +186,6 @@ function update_model!(model::Model, grads, training_context::TrainingContext)
   params = params!(model)
 
   Flux.update!(training_context.optimizer, params, grads)
-
-  for param in params
-    CUDA.unsafe_free!(grads[param])
-  end
-  CUDA.reclaim()
 end
 
 function loss_function(entropy_sum, params, settings::Settings)
@@ -215,7 +199,7 @@ function L2_norm(params, settings::Settings)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.binary_focal_loss(scores, gold, γ=3)
+  Flux.Losses.binary_focal_loss(scores, gold, γ=2)
 end
 
 function train!(model::Model, training_context::TrainingContext)
@@ -231,7 +215,7 @@ function train!(model::Model, training_context::TrainingContext)
   end
 
   train_epoch = () -> begin
-    sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=500)
+    sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=1000)
 
     for sentences_batch in sentences_batches
       train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
@@ -248,7 +232,7 @@ end
 
 function take_grads(model, dataset, context)
   params = params!(model)
-  loss(x, y) = transition_loss(x, y) + L2_norm(params, context.settings)
+  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(params, context.settings)
 
   init_grad_value = (size) -> begin
     if model.gpu_available
@@ -272,7 +256,7 @@ function take_grads(model, dataset, context)
         grads[param] .+= (grad + grad .* (context.settings.reg_weight))
       end
 
-      hasmethod(CUDA.unsafe_free!, Tuple{typeof(grad)}) && CUDA.unsafe_free!(grad)
+      try_unsafe_free(grad)
     end
   end
 
@@ -288,15 +272,12 @@ function take_grads(model, dataset, context)
     data_processed = 0
 
     for data in sample
-      scores = data[begin]
-      gold = data[end]
       gs = gradient(params) do
-        loss(scores, gold)
+        loss(data...)
       end
-      CUDA.unsafe_free!(scores)
-      CUDA.unsafe_free!(gold)
+
       for param in params
-        grad = if hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
+        grad = if model.gpu_available && hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
           gs[param]
         else
           cu(gs[param])
@@ -304,26 +285,22 @@ function take_grads(model, dataset, context)
 
         temp_grads[param] .+= grad
 
-        CUDA.unsafe_free!(grad)
+        model.gpu_available && CUDA.unsafe_free!(grad)
       end
       gs = nothing
 
       data_processed += 1
 
-      if data_processed % 500 == 0
-        CUDA.reclaim()
-        GC.gc(false)
-      end
-
       if data_processed % 5000 == 0
-        CUDA.memory_status()
+        if model.gpu_available
+          CUDA.reclaim()
+          CUDA.memory_status()
+        end
         println("\nThread $(Threads.threadid()) computed additional 5000 data")
       end
     end
 
     merge_grads(temp_grads)
-
-     CUDA.reclaim()
   end
 
   try
@@ -335,6 +312,10 @@ function take_grads(model, dataset, context)
   catch err
     println(err.task.exception)
     return err
+  end
+
+  for param in params
+    grads[param] = grads[param] |> collect
   end
 
   Zygote.Grads(grads, params)
@@ -357,15 +338,13 @@ function build_dataset(model, sentences_batch, training_context)
       length(zero_transitions) == 0 && break
 
       batch = form_batch(model, training_context.settings, config) |> batch -> take_batch_embeddings(model, batch)
-      scores = predict_train(model, batch)
-
       gold  = transition_costs(gold_state) |> gold_scores
       if model.gpu_available
         gold = cu(gold)
       end
 
       lock(mutex) do 
-        push!(train_samples, (scores, gold))
+        push!(train_samples, (batch, gold))
       end
 
       transition = rand(zero_transitions)
@@ -376,10 +355,8 @@ function build_dataset(model, sentences_batch, training_context)
 
     lock(sent_mutex) do 
       sentences_number += 1
-      if sentences_number % 100 == 0
-        CUDA.reclaim()
-        CUDA.memory_status()
-        println("\nSentences processed: $sentences_number")
+      if sentences_number % 250 == 0
+        println("Sentences processed: $sentences_number")
       end
     end
   end
@@ -389,7 +366,7 @@ function build_dataset(model, sentences_batch, training_context)
     Threads.@sync begin
       println("Build dataset...")
       for connlu_sentence in sentences_batch
-        parse_gold_tree(connlu_sentence)
+        Threads.@spawn parse_gold_tree(connlu_sentence)
       end
     end
   catch err
@@ -398,9 +375,6 @@ function build_dataset(model, sentences_batch, training_context)
   end
 
   println("Dataset builded...")
-  GC.gc(false)
-  CUDA.reclaim()
-  CUDA.memory_status()
 
   train_samples
 end
@@ -780,4 +754,8 @@ function take_corenlp_gradient(model, batch, costs, grads_dict, context)
   CUDA.unsafe_free!(cube_hidden)
   CUDA.unsafe_free!(cube_hidden_grad)
   CUDA.unsafe_free!(hidden_grad)
+end
+
+function try_unsafe_free(x)
+  hasmethod(CUDA.unsafe_free!, Tuple{typeof(x)}) && CUDA.unsafe_free!(x)
 end
