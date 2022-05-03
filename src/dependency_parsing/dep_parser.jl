@@ -37,7 +37,6 @@ function (parser::DepParser)(tokens_with_tags)
 
   while !is_terminal(config)
     transition = predict_transition(parser, config)
-    println(transition)
     execute_transition(parser, config, transition) || return config.tree
   end
 
@@ -81,25 +80,24 @@ end
 
 # Temp code for test
 
-system = ArcEager.ArcEagerSystem()
-train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
-test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
-embeddings_file = "F:\\ed_soft\\parser_materials\\wiki-news-300d-1M.vec"
-model_file = "tmp/model_b5000_adagrad_c01_bfl.txt"
-results_file = "tmp/results_b5000_adagrad_c01_bfl.txt"
+function default_train()
+  system = ArcEager.ArcEagerSystem()
+  train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
+  test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
+  embeddings_file = "F:\\ed_soft\\parser_materials\\wiki-news-300d-1M.vec"
+  model_file = "tmp/model_b15000_adagrad_c01_bfl_3.txt"
+  results_file = "tmp/results_b15000_adagrad_c01_fl_3.txt"
 
-connlu_sentences = load_connlu_file(train_file)
-settings = Settings()
-model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache", settings, system, embeddings_file, connlu_sentences)
+  connlu_sentences = load_connlu_file(train_file)
+  settings = Settings()
+  model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache", settings, system, embeddings_file, connlu_sentences)
 
-sort(collect(model.label_ids), by=pair->pair[end]) |>
-      pairs -> map(pair -> pair[begin], pairs) |>
-      labels -> set_labels!(system, labels)
+  sort(collect(model.label_ids), by=pair->pair[end]) |>
+        pairs -> map(pair -> pair[begin], pairs) |>
+        labels -> set_labels!(system, labels)
 
-train!(train_file, test_file, results_file, model, system, model_file)
-
-write_to_file!(model, model_file)
-
+  train!(train_file, test_file, results_file, model, system, model_file)
+end
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)
