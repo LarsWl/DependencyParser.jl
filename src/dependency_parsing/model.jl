@@ -53,7 +53,7 @@ mutable struct Model
     set_corpus_data!(model, connlu_sentences)
     set_labels!(system, model.label_ids |> keys |> collect)
 
-    model.embeddings = rand(Float32, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
+    model.embeddings = rand(Float64, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
@@ -72,12 +72,12 @@ mutable struct Model
     word_ids = Dict{String, Integer}()
     tag_ids = Dict{String, Integer}()
     label_ids = Dict{String, Integer}()
-    embeddings = Matrix{Float32}(undef, total_ids_count, embeddings_size)
+    embeddings = Matrix{Float64}(undef, total_ids_count, embeddings_size)
 
     # read all embeddings for words, tags and labels
     for i = 1:total_ids_count
       line = lines[i + 1]
-      entity, embedding = split(line) |> values -> [values[begin], map(value -> parse(Float32, value), values[begin+1:end])]
+      entity, embedding = split(line) |> values -> [values[begin], map(value -> parse(Float64, value), values[begin+1:end])]
       embeddings[i, :] = embedding
 
       # Depend on index define entity as word or as tag or as label
@@ -93,21 +93,21 @@ mutable struct Model
     info_line = lines[total_ids_count + 2]
     batch_size, hidden_size, labels_num = split(info_line) |> info_values -> map(value -> parse(Int32, value), info_values)
 
-    hidden_layer = Matrix{Float32}(undef, hidden_size, batch_size * embeddings_size)
-    output_layer = Matrix{Float32}(undef, labels_num, hidden_size)
+    hidden_layer = Matrix{Float64}(undef, hidden_size, batch_size * embeddings_size)
+    output_layer = Matrix{Float64}(undef, labels_num, hidden_size)
 
     # read hidden layer weights and bias
     for i = 1:hidden_size
       line = lines[i + total_ids_count + 2]
-      hidden_layer[i, :] = split(line) |> values -> map(value -> parse(Float32, value), values)
+      hidden_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
     end
     hidden_bias_line = lines[begin + total_ids_count + hidden_size + 2]
-    hidden_bias = split(hidden_bias_line) |> values -> map(value -> parse(Float32, value), values)
+    hidden_bias = split(hidden_bias_line) |> values -> map(value -> parse(Float64, value), values)
 
     # read softmax layer weights
     for i = 1:labels_num
       line = lines[i + total_ids_count + hidden_size + 3]
-      output_layer[i, :] = split(line) |> values -> map(value -> parse(Float32, value), values)
+      output_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
     end
 
     model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), word_ids, tag_ids, label_ids)
@@ -118,7 +118,7 @@ mutable struct Model
 end
 
 function calculate_hidden(model, input; dropout_active=false)
-  result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
+  result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
   if model.gpu_available
     result = cu(result)
   end
@@ -199,11 +199,11 @@ function L2_norm(params, settings::Settings)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.binary_focal_loss(scores, gold, γ=2)
+  Flux.Losses.binary_focal_loss(scores, gold, γ=1)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAGrad(0.01)
+  training_context.optimizer = ADAM(0.01)
   train_samples = []
   model.gpu_available = CUDA.functional()
 
@@ -215,7 +215,7 @@ function train!(model::Model, training_context::TrainingContext)
   end
 
   train_epoch = () -> begin
-    sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=1000)
+    sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=750)
 
     for sentences_batch in sentences_batches
       train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
@@ -236,9 +236,9 @@ function take_grads(model, dataset, context)
 
   init_grad_value = (size) -> begin
     if model.gpu_available
-      CUDA.zeros(Float32, size)
+      CUDA.zeros(Float64, size)
     else
-      zeros(Float32, size)
+      zeros(Float64, size)
     end
   end
   grads = IdDict(
@@ -253,7 +253,7 @@ function take_grads(model, dataset, context)
     for param in params
       grad = computed_grads[param]
       lock(mutex) do 
-        grads[param] .+= (grad + grad .* (context.settings.reg_weight))
+        grads[param] .+= grad
       end
 
       try_unsafe_free(grad)
@@ -263,12 +263,6 @@ function take_grads(model, dataset, context)
   compute_sample = (sample) -> begin
     println("Thread $(Threads.threadid()) begin compute...")
 
-    temp_grads = IdDict(
-      model.embeddings => size(model.embeddings) |> init_grad_value,
-      model.hidden_layer.weight => size(model.hidden_layer.weight) |> init_grad_value,
-      model.hidden_layer.bias => size(model.hidden_layer.bias) |> init_grad_value,
-      model.output_layer.weight => size(model.output_layer.weight) |> init_grad_value
-    )
     data_processed = 0
 
     for data in sample
@@ -277,45 +271,32 @@ function take_grads(model, dataset, context)
       end
 
       for param in params
-        grad = if model.gpu_available && hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
+        gs[param] = if model.gpu_available && hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
           gs[param]
         else
           cu(gs[param])
         end
-
-        temp_grads[param] .+= grad
-
-        model.gpu_available && CUDA.unsafe_free!(grad)
       end
-      gs = nothing
+      merge_grads(gs)
 
       data_processed += 1
+      data_processed % 250 == 0 && println(loss(data...))
 
       if data_processed % 5000 == 0
-        if model.gpu_available
-          CUDA.reclaim()
-          CUDA.memory_status()
-        end
-        println("\nThread $(Threads.threadid()) computed additional 5000 data")
+        println("Thread $(Threads.threadid()) computed additional 5000 data")
       end
     end
-
-    merge_grads(temp_grads)
   end
 
   try
     Threads.@sync begin
       for sample in dataset
-        Threads.@spawn compute_sample(sample)
+        compute_sample(sample)
       end
     end
   catch err
     println(err.task.exception)
     return err
-  end
-
-  for param in params
-    grads[param] = grads[param] |> collect
   end
 
   Zygote.Grads(grads, params)
@@ -536,7 +517,7 @@ function read_embeddings_file(filename::String)
   words_count, dimension = split(lines[begin]) |> (numbers -> map(number -> parse(Int64, number), numbers))
   deleteat!(lines, 1)
 
-  embeddings = zeros(Float32, words_count, dimension)
+  embeddings = zeros(Float64, words_count, dimension)
   embedding_ids = Dict{String, Integer}()
 
   foreach(enumerate(lines)) do (index, line)
@@ -545,14 +526,16 @@ function read_embeddings_file(filename::String)
     embedding_ids[string(word)] = index
 
     for i = 1:dimension
-      embeddings[index, i] = parse(Float32, splitted[i + 1])
+      embeddings[index, i] = parse(Float64, splitted[i + 1])
     end
   end
 
   [embeddings, embedding_ids]
 end
 
-function match_embeddings!(embeddings::Matrix{Float32}, loaded_embeddings::Matrix{Float32}, embedding_ids::Dict{String, Integer}, known_words::Vector{String})
+function match_embeddings!(embeddings::Matrix{Float64}, loaded_embeddings::Matrix{Float64}, embedding_ids::Dict{String, Integer}, known_words::Vector{String})
+  embeddings_size = size(embeddings)[end]
+  
   foreach(enumerate(known_words)) do (index, word)
     embedding_id = if haskey(embedding_ids, word)
       embedding_ids[word]
@@ -564,6 +547,8 @@ function match_embeddings!(embeddings::Matrix{Float32}, loaded_embeddings::Matri
 
     if embedding_id > 0
       embeddings[index, :] = loaded_embeddings[embedding_id, :]
+    else
+      embeddings[index, :] = [rand(-100:100) / 10000.0 for i in 1:embeddings_size]
     end
   end
 end
@@ -709,7 +694,7 @@ function take_corenlp_gradient(model, batch, costs, grads_dict, context)
   output_weight_grad = grads_dict[model.output_layer.weight]
   embeddings_grad = grads_dict[model.embeddings]
 
-  cube_hidden_grad = CUDA.zeros(Float32, size(cube_hidden))
+  cube_hidden_grad = CUDA.zeros(Float64, size(cube_hidden))
   
   foreach(enumerate(costs)) do (index, cost)
     if cost != FORBIDDEN_COST
