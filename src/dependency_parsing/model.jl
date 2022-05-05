@@ -117,6 +117,8 @@ mutable struct Model
   end
 end
 
+Flux.trainable(m::Model) = (m.embeddings, m.hidden_layer.weight, m.hidden_layer.bias, m.output_layer.weight,)
+
 function calculate_hidden(model, input; dropout_active=false)
   result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
   if model.gpu_available
@@ -139,15 +141,6 @@ function calculate_hidden(model, input; dropout_active=false)
   result
 end
 
-function params!(model::Model)
-  Flux.params([
-    model.embeddings,
-    model.hidden_layer.weight,
-    model.hidden_layer.bias,
-    model.output_layer.weight
-  ])
-end
-
 function predict(model::Model, batch)
   (calculate_hidden(model, batch) .^ 3) |>
     model.output_layer |>
@@ -167,7 +160,7 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
 end
 
 function predict_train(model::Model, batch)
-  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
+  (calculate_hidden(model, batch, dropout_active = false) .^ 3) |>
     model.output_layer |>
     softmax
 end
@@ -183,9 +176,7 @@ end
 function update_model!(model::Model, grads, training_context::TrainingContext)
   println("Begin update model....")
 
-  params = params!(model)
-
-  Flux.update!(training_context.optimizer, params, grads)
+  Flux.update!(training_context.optimizer, Flux.params(model), grads)
 end
 
 function loss_function(entropy_sum, params, settings::Settings)
@@ -203,7 +194,7 @@ function transition_loss(scores, gold)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAM(0.01)
+  training_context.optimizer = ADAM()
   train_samples = []
   model.gpu_available = CUDA.functional()
 
@@ -230,8 +221,41 @@ function train!(model::Model, training_context::TrainingContext)
   Flux.@epochs 500 train_epoch()
 end
 
+# THERE IS A TEMP CODE USED FOR TRAINING THAT I RUN IN REPL
+
+# sentences_batch = training_context.connlu_sentences[begin:begin + 10]
+# println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
+# for i in 1:100
+#   train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
+#   grads = take_grads(model, train_samples, training_context)
+#   update_model!(model, grads, training_context)
+# end
+# println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
+
+# data = train_samples.data[begin]
+# loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, training_context.settings)
+
+# println(loss(data...))
+# for i in 1:1000
+#   Flux.train!(loss, ps, [data], training_context.optimizer)
+# end
+# println(loss(data...))
+
+# gs |> collect
+
+# hidden_layer = Dense(settings.batch_size * 50, 10)
+# output_layer = Dense(10, 92, bias=false)
+# embeddings = model.embeddings[:, begin:begin + 49] |> collect
+# model2 = Model(embeddings, hidden_layer, output_layer, model.word_ids, model.tag_ids, model.label_ids)
+
+# model2.embeddings = cu(model2.embeddings)
+# model2.hidden_layer = fmap(cu, model2.hidden_layer)
+# model2.output_layer = fmap(cu, model2.output_layer)
+
+system |> transitions_number
+
 function take_grads(model, dataset, context)
-  params = params!(model)
+  ps = Flux.params(model)
   loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(params, context.settings)
 
   init_grad_value = (size) -> begin
@@ -250,7 +274,7 @@ function take_grads(model, dataset, context)
 
   mutex = ReentrantLock()
   merge_grads = (computed_grads) -> begin
-    for param in params
+    for param in ps
       grad = computed_grads[param]
       lock(mutex) do 
         grads[param] .+= grad
@@ -266,11 +290,11 @@ function take_grads(model, dataset, context)
     data_processed = 0
 
     for data in sample
-      gs = gradient(params) do
+      gs = gradient(ps) do
         loss(data...)
       end
 
-      for param in params
+      for param in ps
         gs[param] = if model.gpu_available && hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
           gs[param]
         else
@@ -299,7 +323,7 @@ function take_grads(model, dataset, context)
     return err
   end
 
-  Zygote.Grads(grads, params)
+  Zygote.Grads(grads, ps)
 end
 
 function build_dataset(model, sentences_batch, training_context)
@@ -411,7 +435,7 @@ function test_training_scores(model::Model, context::TrainingContext)
 end
 
 function test_loss(model::Model, connlu_sentence::ConnluSentence, training_context::TrainingContext)
-  params = params!(model)
+  params = Flux.params(model)
   chain = Chain(
     input -> calculate_hidden(model, input) .^ 3,
     model.output_layer,

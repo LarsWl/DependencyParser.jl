@@ -62,7 +62,7 @@ function train!(train_file::String, test_file::String, results_file::String, mod
   println("Parse train file...")
   connlu_sentences = load_connlu_file(train_file)
   test_sentences = load_connlu_file(test_file)
-  settings = Settings()
+  settings = Settings(embeddings_size=100)
 
 
   training_context = TrainingContext(
