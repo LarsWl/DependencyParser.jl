@@ -22,5 +22,5 @@ function gold_scores(costs::Vector{Int64})
     else
       0
     end
-  end |> softmax
+  end
 end

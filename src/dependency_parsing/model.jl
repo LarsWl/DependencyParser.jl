@@ -142,7 +142,7 @@ function calculate_hidden(model, input; dropout_active=false)
 end
 
 function predict(model::Model, batch)
-  (calculate_hidden(model, batch) .^ 3) |>
+  (calculate_hidden(model, batch) .|> tanh) |>
     model.output_layer |>
     softmax
 end
@@ -160,7 +160,7 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
 end
 
 function predict_train(model::Model, batch)
-  (calculate_hidden(model, batch, dropout_active = false) .^ 3) |>
+  (calculate_hidden(model, batch, dropout_active = false) .|> tanh) |>
     model.output_layer |>
     softmax
 end
@@ -173,28 +173,33 @@ function predict_transition(model::Model, settings::Settings, system::ParsingSys
     max_score_with_index -> system.transitions[max_score_with_index[end]]
 end
 
-function update_model!(model::Model, grads, training_context::TrainingContext)
-  println("Begin update model....")
+function update_model!(model::Model, dataset, training_context::TrainingContext)
+  ps = Flux.params(model)
 
-  Flux.update!(training_context.optimizer, Flux.params(model), grads)
+  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, training_context.settings)
+
+  evalcb = () -> @show test_loss(model, rand(training_context.test_connlu_sentences), training_context)
+  throttle_cb = Flux.throttle(evalcb, 10)
+
+  Flux.train!(loss, ps, dataset, training_context.optimizer, cb = throttle_cb)
 end
 
-function loss_function(entropy_sum, params, settings::Settings)
-  entropy_sum + L2_norm(params, settings)
+function loss_function(entropy_sum, ps, settings::Settings)
+  entropy_sum + L2_norm(ps, settings)
 end
 
-function L2_norm(params, settings::Settings)
+function L2_norm(ps, settings::Settings)
   sqnorm(x) = sum(abs2, x)
 
-  sum(sqnorm, params) * (settings.reg_weight / 2)
+  sum(sqnorm, ps) * (settings.reg_weight / 2)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.binary_focal_loss(scores, gold, γ=1)
+  Flux.Losses.focal_loss(scores, gold, γ=0)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAM()
+  training_context.optimizer = ADAGrad(0.01)
   train_samples = []
   model.gpu_available = CUDA.functional()
 
@@ -206,12 +211,18 @@ function train!(model::Model, training_context::TrainingContext)
   end
 
   train_epoch = () -> begin
-    sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=750)
+    # sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=750)
 
-    for sentences_batch in sentences_batches
-      train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
-      grads = take_grads(model, train_samples, training_context)
-      update_model!(model, grads, training_context)
+    # for sentences_batch in sentences_batches
+    #   train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
+    #   grads = take_grads(model, train_samples, training_context)
+    #   update_model!(model, grads, training_context)
+    # end
+
+    train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size)
+
+    for sample in train_samples
+      update_model!(model, sample, training_context)
     end
 
     println("Epocha ends, start test")
@@ -252,11 +263,11 @@ end
 # model2.hidden_layer = fmap(cu, model2.hidden_layer)
 # model2.output_layer = fmap(cu, model2.output_layer)
 
-system |> transitions_number
+# system |> transitions_number
 
 function take_grads(model, dataset, context)
   ps = Flux.params(model)
-  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(params, context.settings)
+  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, context.settings)
 
   init_grad_value = (size) -> begin
     if model.gpu_available
@@ -331,7 +342,10 @@ function build_dataset(model, sentences_batch, training_context)
   mutex = ReentrantLock()
   sent_mutex = ReentrantLock()
   sentences_number = 0
-  parse_gold_tree = (connlu_sentence) -> begin
+
+  parsed_trees_file = "tmp/parsed_trees.txt"
+  trees_mutex = ReentrantLock()
+  parse_gold_tree = (connlu_sentence, file) -> begin
     sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
     transitions_number = 0
     config = Configuration(sentence)
@@ -364,14 +378,24 @@ function build_dataset(model, sentences_batch, training_context)
         println("Sentences processed: $sentences_number")
       end
     end
+
+    tree_text = convert_to_string(config.tree)
+
+    lock(trees_mutex) do 
+      write(file, tree_text)
+      write(file, "\n")
+      write(file, "\n")
+    end
   end
 
 
   try
-    Threads.@sync begin
-      println("Build dataset...")
-      for connlu_sentence in sentences_batch
-        Threads.@spawn parse_gold_tree(connlu_sentence)
+    open(parsed_trees_file, "w") do file
+      Threads.@sync begin
+        println("Build dataset...")
+        for connlu_sentence in sentences_batch
+          Threads.@spawn parse_gold_tree(connlu_sentence, file)
+        end
       end
     end
   catch err
@@ -435,9 +459,9 @@ function test_training_scores(model::Model, context::TrainingContext)
 end
 
 function test_loss(model::Model, connlu_sentence::ConnluSentence, training_context::TrainingContext)
-  params = Flux.params(model)
+  ps = Flux.params(model)
   chain = Chain(
-    input -> calculate_hidden(model, input) .^ 3,
+    input -> calculate_hidden(model, input) .|> tanh,
     model.output_layer,
     softmax
   )
@@ -478,7 +502,7 @@ function test_loss(model::Model, connlu_sentence::ConnluSentence, training_conte
     transition_loss(chain(batch), gold)
   end
 
-  loss_function(entropy_sum, params, training_context.settings)
+  loss_function(entropy_sum, ps, training_context.settings)
 end
 
 

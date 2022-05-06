@@ -68,6 +68,7 @@ function train!(train_file::String, test_file::String, results_file::String, mod
   training_context = TrainingContext(
     system,
     settings,
+    train_file,
     connlu_sentences,
     test_sentences,
     test_file,
@@ -85,8 +86,8 @@ function default_train()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b15000(750)_adam_c01_bfl1_e100.txt"
-  results_file = "tmp/results_b15000(750)_adam_c01_bfl1_e100.txt"
+  model_file = "tmp/model_b15000(750)_adam_c01_fl0_e100.txt"
+  results_file = "tmp/results_b15000(750)_adam_c01_fl0_e100.txt"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
