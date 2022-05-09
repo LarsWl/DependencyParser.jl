@@ -86,8 +86,8 @@ function default_train()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b15000(750)_adam_c01_fl0_e100.txt"
-  results_file = "tmp/results_b15000(750)_adam_c01_fl0_e100.txt"
+  model_file = "tmp/model_b1000_adagrad_c01_fl0_e100"
+  results_file = "tmp/results_b1000_adagrad_c01_fl0_e100"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)

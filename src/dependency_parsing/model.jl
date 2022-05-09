@@ -16,7 +16,7 @@ using DependencyParserTest
   output layer weights dimensions: labels_num * hidden_size
 =#
 
-CUDA.allowscalar(false)
+# CUDA.allowscalar(false)
 
 mutable struct Model
   embeddings
@@ -57,7 +57,7 @@ mutable struct Model
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
-    model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false)
+    model.output_layer = Dense(settings.hidden_size, transitions_number(system) * 3, bias=false)
     model.gpu_available = CUDA.functional()
     
     model
@@ -127,7 +127,7 @@ function calculate_hidden(model, input; dropout_active=false)
 
   embeddings_size = length(model.embeddings[begin, :])
   batch_size = length(input)
-  hidden_weight = Flux.dropout(model.hidden_layer.weight, 0.5, active = dropout_active, dims = 1)
+  hidden_weight = model.hidden_layer.weight
 
   for i in 1:batch_size
     offset = (i - 1) * embeddings_size
@@ -138,13 +138,13 @@ function calculate_hidden(model, input; dropout_active=false)
 
   result += model.hidden_layer.bias
 
-  result
+  Flux.dropout(result, 0.5, active = dropout_active, dims = 1)
 end
 
 function predict(model::Model, batch)
-  (calculate_hidden(model, batch) .|> tanh) |>
+  (calculate_hidden(model, batch) .^ 3) |>
     model.output_layer |>
-    softmax
+    calculate_softmax
 end
 
 function train_predict_tree(model::Model, sentence::Sentence, context::TrainingContext)
@@ -159,26 +159,40 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
   config.tree
 end
 
+function calculate_softmax(input)
+  offset = Int64(length(input[:, begin]) / 3)
+
+  res = [softmax(view(input, (i - 1) * 3 + 1:(i - 1) * 3 + 3)) for i in 1:offset] |> res -> hcat(res...) |> cu
+
+  res
+end
+
 function predict_train(model::Model, batch)
-  (calculate_hidden(model, batch, dropout_active = false) .|> tanh) |>
-    model.output_layer |>
-    softmax
+  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
+    Flux.normalise |>
+    model.output_layer |> 
+    Flux.normalise |>
+    calculate_softmax
 end
 
 
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
   form_batch(model, settings, config) |> batch -> take_batch_embeddings(model, batch) |>
     batch ->predict(model, batch) |>
-    scores -> findmax(scores) |>
+    scores -> findmax(scores[begin, :]) |>
     max_score_with_index -> system.transitions[max_score_with_index[end]]
 end
 
 function update_model!(model::Model, dataset, training_context::TrainingContext)
   ps = Flux.params(model)
 
-  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, training_context.settings)
+  loss = (sample) -> begin
+    sum(sample) do (batch, gold, weight)
+      predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+    end + L2_norm(ps, training_context.settings)
+  end
 
-  evalcb = () -> @show test_loss(model, rand(training_context.test_connlu_sentences), training_context)
+  evalcb = () -> @show test_loss(model, first(dataset), training_context)
   throttle_cb = Flux.throttle(evalcb, 10)
 
   Flux.train!(loss, ps, dataset, training_context.optimizer, cb = throttle_cb)
@@ -211,19 +225,14 @@ function train!(model::Model, training_context::TrainingContext)
   end
 
   train_epoch = () -> begin
-    # sentences_batches = Flux.DataLoader(training_context.connlu_sentences, batchsize=750)
+    train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
 
-    # for sentences_batch in sentences_batches
-    #   train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
-    #   grads = take_grads(model, train_samples, training_context)
-    #   update_model!(model, grads, training_context)
-    # end
+    update_model!(model, train_samples, training_context)
 
-    train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size)
+    train_samples = nothing
 
-    for sample in train_samples
-      update_model!(model, sample, training_context)
-    end
+    GC.gc()
+    CUDA.reclaim()
 
     println("Epocha ends, start test")
     test_training_scores(model, training_context)
@@ -234,7 +243,7 @@ end
 
 # THERE IS A TEMP CODE USED FOR TRAINING THAT I RUN IN REPL
 
-# sentences_batch = training_context.connlu_sentences[begin:begin + 10]
+# train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
 # println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
 # for i in 1:100
 #   train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
@@ -243,14 +252,65 @@ end
 # end
 # println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
 
-# data = train_samples.data[begin]
-# loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, training_context.settings)
+# using Random
+# data = shuffle(train_samples.data)[begin:begin+1000]
 
-# println(loss(data...))
-# for i in 1:1000
+# findall(d -> d[end][begin, begin] == 1, data) |> length
+# println(map(d -> findmax(d[2][begin, :])[end], data))
+# loss = (sample) -> begin
+#   sum(sample) do (batch, gold, weight)
+#     predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+#   end + L2_norm(ps, training_context.settings)
+# end
+# ps = Flux.params(model)
+
+# data[begin][2]
+# predict_train(model, data[begin][begin])
+# predict(model, data[begin][begin])
+# loss([data[begin]])
+
+
+# connlu_sentence = training_context.connlu_sentences[begin + 1]
+# sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
+# config = Configuration(sentence)
+
+# t = predict_transition(model, training_context.settings, training_context.system, config)
+# execute_transition(config, trans, training_context.system)
+# gold_state = GoldState(connlu_sentence.gold_tree, config, training_context.system)
+# gold  = transition_costs(gold_state) |> gold_scores
+# config
+
+# trans = Transition(ArcEager.Shift(), "")
+
+# println(gold[begin, :])
+
+# batch = form_batch(model, training_context.settings, config) |> b -> take_batch_embeddings(model, b)
+# findmax(predict(model, batch)[begin, :])
+
+# train_samples.data |> length
+# training_context.system.transitions[7]
+# findmax(gold[begin, :])
+# println(loss(data))
+# for i in 1:3
 #   Flux.train!(loss, ps, [data], training_context.optimizer)
 # end
-# println(loss(data...))
+# println(loss(data))
+
+
+# CUDA.memory_status()
+# CUDA.reclaim()
+# GC.gc()
+# for i in 1:100
+#   Flux.train!(loss, ps, [[data[begin]]], training_context.optimizer)
+# end
+
+# calculate_hidden(model, batch) .^ 2 |> softmax
+# fmap(CuArray{Float64}, model.hidden_layer)
+
+# gs = gradient(ps) do
+#   loss(data)
+# end
+
 
 # gs |> collect
 
@@ -265,87 +325,15 @@ end
 
 # system |> transitions_number
 
-function take_grads(model, dataset, context)
-  ps = Flux.params(model)
-  loss(x, y) = predict_train(model, x) |> scores -> transition_loss(scores, y) + L2_norm(ps, context.settings)
-
-  init_grad_value = (size) -> begin
-    if model.gpu_available
-      CUDA.zeros(Float64, size)
-    else
-      zeros(Float64, size)
-    end
-  end
-  grads = IdDict(
-    model.embeddings => size(model.embeddings) |> init_grad_value,
-    model.hidden_layer.weight => size(model.hidden_layer.weight) |> init_grad_value,
-    model.hidden_layer.bias => size(model.hidden_layer.bias) |> init_grad_value,
-    model.output_layer.weight => size(model.output_layer.weight) |> init_grad_value
-  )
-
-  mutex = ReentrantLock()
-  merge_grads = (computed_grads) -> begin
-    for param in ps
-      grad = computed_grads[param]
-      lock(mutex) do 
-        grads[param] .+= grad
-      end
-
-      try_unsafe_free(grad)
-    end
-  end
-
-  compute_sample = (sample) -> begin
-    println("Thread $(Threads.threadid()) begin compute...")
-
-    data_processed = 0
-
-    for data in sample
-      gs = gradient(ps) do
-        loss(data...)
-      end
-
-      for param in ps
-        gs[param] = if model.gpu_available && hasmethod(CUDA.unsafe_free!, Tuple{typeof(gs[param])})
-          gs[param]
-        else
-          cu(gs[param])
-        end
-      end
-      merge_grads(gs)
-
-      data_processed += 1
-      data_processed % 250 == 0 && println(loss(data...))
-
-      if data_processed % 5000 == 0
-        println("Thread $(Threads.threadid()) computed additional 5000 data")
-      end
-    end
-  end
-
-  try
-    Threads.@sync begin
-      for sample in dataset
-        compute_sample(sample)
-      end
-    end
-  catch err
-    println(err.task.exception)
-    return err
-  end
-
-  Zygote.Grads(grads, ps)
-end
-
 function build_dataset(model, sentences_batch, training_context)
   train_samples = []
+  frequency = Dict()
+  frequency_by_class = Dict()
   mutex = ReentrantLock()
   sent_mutex = ReentrantLock()
   sentences_number = 0
 
-  parsed_trees_file = "tmp/parsed_trees.txt"
-  trees_mutex = ReentrantLock()
-  parse_gold_tree = (connlu_sentence, file) -> begin
+  parse_gold_tree = (connlu_sentence) -> begin
     sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
     transitions_number = 0
     config = Configuration(sentence)
@@ -358,12 +346,29 @@ function build_dataset(model, sentences_batch, training_context)
 
       batch = form_batch(model, training_context.settings, config) |> batch -> take_batch_embeddings(model, batch)
       gold  = transition_costs(gold_state) |> gold_scores
-      if model.gpu_available
-        gold = cu(gold)
-      end
+      gold_correct = findall(e -> e == 1, gold[begin, :])
 
-      lock(mutex) do 
-        push!(train_samples, (batch, gold))
+      is_only_shift = length(zero_transitions) == 1 && gold[begin, begin] == 1
+      is_only_reduce = length(zero_transitions) == 1 && gold[begin + 1, begin] == 1
+
+      if !(is_only_shift || is_only_reduce) || rand(1:4) == 1
+        lock(mutex) do
+          if haskey(frequency, gold_correct)
+            frequency[gold_correct] += 1
+          else
+            frequency[gold_correct] = 1
+          end
+
+          for class in 1:length(gold[begin, :])
+            if !haskey(frequency_by_class, class)
+              frequency_by_class[class] = [1, 1, 1]
+            end
+
+            frequency_by_class[class] .+= gold[:, class]
+          end
+
+          push!(train_samples, (batch, gold))
+        end
       end
 
       transition = rand(zero_transitions)
@@ -378,24 +383,14 @@ function build_dataset(model, sentences_batch, training_context)
         println("Sentences processed: $sentences_number")
       end
     end
-
-    tree_text = convert_to_string(config.tree)
-
-    lock(trees_mutex) do 
-      write(file, tree_text)
-      write(file, "\n")
-      write(file, "\n")
-    end
   end
 
 
   try
-    open(parsed_trees_file, "w") do file
-      Threads.@sync begin
-        println("Build dataset...")
-        for connlu_sentence in sentences_batch
-          Threads.@spawn parse_gold_tree(connlu_sentence, file)
-        end
+    Threads.@sync begin
+      println("Build dataset...")
+      for connlu_sentence in sentences_batch
+        Threads.@spawn parse_gold_tree(connlu_sentence)
       end
     end
   catch err
@@ -403,6 +398,27 @@ function build_dataset(model, sentences_batch, training_context)
     return err
   end
 
+  println("Calculate weights")
+
+  train_samples = map(train_samples) do sample
+    gold = sample[end]
+    gold_correct = findall(e -> e == 1, gold[begin, :])
+    weight = 1
+    weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
+      pairs -> map(pair -> (pair[end] .^ -1) .* length(train_samples), pairs) |> 
+      vecs -> hcat(vecs...)
+
+    if model.gpu_available
+      gold = cu(gold)
+      weight_matrix = cu(weight_matrix)
+    end
+
+    gold .*= weight_matrix
+
+    (sample[begin], gold, weight)
+  end
+
+  println(frequency)
   println("Dataset builded...")
 
   train_samples
@@ -412,30 +428,42 @@ function test_training_scores(model::Model, context::TrainingContext)
   losses = []
   parsed_trees_file = "tmp/parsed_trees.txt"
   mutex = ReentrantLock()
+  losses_mutex = ReentrantLock()
   parse_tree = (connlu_sentence, file) -> begin
     sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
 
     tree = train_predict_tree(model, sentence, context)
     tree_text = convert_to_string(tree)
-    avg_loss = test_loss(model, connlu_sentence, context)
 
     lock(mutex) do 
       write(file, tree_text)
       write(file, "\n")
       write(file, "\n")
+    end
+  end
 
-      push!(losses, avg_loss)
+  parse_sample = (sample) -> begin
+    loss = test_loss(model, sample, context)
+
+    lock(losses_mutex) do 
+      push!(losses, loss)
     end
   end
 
   Threads.@sync begin
+    test_samples = Flux.DataLoader(build_dataset(model, context.test_connlu_sentences, context), batchsize=context.settings.sample_size, shuffle=true)
+
+    for sample in test_samples 
+      Threads.@spawn parse_sample(sample)
+    end
+
     open(parsed_trees_file, "w") do file
       foreach(context.test_connlu_sentences) do connlu_sentence
         parse_tree(connlu_sentence, file)
       end
     end
   end
-
+    
   conllu_source = DependencyParserTest.Sources.ConlluSource(context.test_connlu_file)
   parser_source = DependencyParserTest.Sources.CoreNLPSource(parsed_trees_file)
 
@@ -449,63 +477,24 @@ function test_training_scores(model::Model, context::TrainingContext)
     write(file, result_line)
   end
 
+  write_to_file!(model, context.model_file * "_last.txt")
+
   if uas > context.best_uas || (uas == context.best_uas && las > context.best_las)
     context.best_uas = uas
     context.best_las = las
     context.best_loss = avg_loss
 
-    write_to_file!(model, context.model_file)
+    write_to_file!(model, ontext.model_file * "_best.txt")
   end
 end
 
-function test_loss(model::Model, connlu_sentence::ConnluSentence, training_context::TrainingContext)
+function test_loss(model::Model, sample, context)
   ps = Flux.params(model)
-  chain = Chain(
-    input -> calculate_hidden(model, input) .|> tanh,
-    model.output_layer,
-    softmax
-  )
-  sentence_sample = []
 
-  sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-  config = Configuration(sentence)
-  transitions_number = 0
-
-  while !is_terminal(config)
-    gold_state = GoldState(connlu_sentence.gold_tree, config, training_context.system)
-
-    predicted_transition = predict_transition(model, training_context.settings, training_context.system, config)
-    zero_transitions = zero_cost_transitions(gold_state)
-    length(zero_transitions) == 0 && break
-
-    if !(predicted_transition in zero_transitions)
-      batch = form_batch(model, training_context.settings, config) |> batch -> take_batch_embeddings(model, batch)
-      gold  = transition_costs(gold_state) |> gold_scores
-
-      if model.gpu_available
-        gold = cu(gold)
-      end
-
-      push!(sentence_sample, (batch, gold))
-    end
-    
-    transition = rand(zero_transitions)
-
-    execute_transition(config, transition, training_context.system)
-
-    transitions_number += 1
-
-    transitions_number >= LIMIT_TRANSITIONS_NUMBER && break
-  end
-
-  entropy_sum = sum(sentence_sample) do (batch, gold)
-    transition_loss(chain(batch), gold)
-  end
-
-  loss_function(entropy_sum, ps, training_context.settings)
+  sum(sample) do (batch, gold, weight)
+    predict(model, batch) |> scores -> weight * transition_loss(scores, gold)
+  end + L2_norm(ps, context.settings)
 end
-
-
 
 #=
 File structure

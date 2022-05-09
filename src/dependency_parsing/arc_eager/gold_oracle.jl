@@ -16,11 +16,18 @@ end
 function gold_scores(costs::Vector{Int64})
   map(costs) do cost 
     if cost == FORBIDDEN_COST
-      -1
+      [0.0, 0.0, 1.0]
     elseif cost <= 0
-      1
+      [1.0, 0.0, 0.0]
     else
-      0
-    end
-  end
+      [0.0, 1.0, 0.0]
+    end 
+  end |> scores -> hcat(scores...) # .* weight_mask(costs)
+end
+
+function weight_mask(costs)
+  shift_weights = [1, 1, 2]
+  other_weights = [[2, 1, 2] for i in 1:(length(costs) - 1)]
+
+  hcat(shift_weights, other_weights...)
 end
