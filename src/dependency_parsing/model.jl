@@ -170,7 +170,7 @@ end
 function predict_train(model::Model, batch)
   (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
     Flux.normalise |>
-    model.output_layer |> 
+    model.output_layer |>
     Flux.normalise |>
     calculate_softmax
 end
@@ -224,12 +224,12 @@ function train!(model::Model, training_context::TrainingContext)
     model.output_layer = fmap(cu, model.output_layer)
   end
 
+  training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+30]
+
+  train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences[begin:begin + 110], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+
   train_epoch = () -> begin
-    train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
-
     update_model!(model, train_samples, training_context)
-
-    train_samples = nothing
 
     GC.gc()
     CUDA.reclaim()
@@ -264,9 +264,9 @@ end
 # end
 # ps = Flux.params(model)
 
-# data[begin][2]
+# @show data[begin][2]
 # predict_train(model, data[begin][begin])
-# predict(model, data[begin][begin])
+# predict(model, data[begin + 3][begin])
 # loss([data[begin]])
 
 
@@ -296,6 +296,17 @@ end
 # end
 # println(loss(data))
 
+# loss_dict = Dict()
+
+# foreach(data) do (batch, gold, weight)
+#   correct = findall(e -> e != 0, gold[begin, :])
+#   if haskey(loss_dict, correct)
+#     loss_dict[correct] += predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+#   else
+#     loss_dict[correct] = predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+#   end
+# end
+# @info sort(collect(loss_dict), by = pair -> pair[end])
 
 # CUDA.memory_status()
 # CUDA.reclaim()
@@ -402,10 +413,10 @@ function build_dataset(model, sentences_batch, training_context)
 
   train_samples = map(train_samples) do sample
     gold = sample[end]
-    gold_correct = findall(e -> e == 1, gold[begin, :])
-    weight = 1
+    gold_correct = findall(e -> e != 0, gold[begin, :])
+    weight = 1 # / sqrt(frequency[gold_correct] / 2)
     weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
-      pairs -> map(pair -> (pair[end] .^ -1) .* length(train_samples), pairs) |> 
+      pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...), pairs) |> 
       vecs -> hcat(vecs...)
 
     if model.gpu_available
@@ -415,13 +426,21 @@ function build_dataset(model, sentences_batch, training_context)
 
     gold .*= weight_matrix
 
-    (sample[begin], gold, weight)
+    repeat_number = if frequency[gold_correct] < 100
+      1
+    elseif frequency[gold_correct] < 300
+      1
+    else
+      1
+    end
+
+    [(sample[begin], gold, weight) for i in 1:repeat_number]
   end
 
   println(frequency)
   println("Dataset builded...")
 
-  train_samples
+  Iterators.flatten(train_samples) |> collect
 end
 
 function test_training_scores(model::Model, context::TrainingContext)
@@ -484,7 +503,7 @@ function test_training_scores(model::Model, context::TrainingContext)
     context.best_las = las
     context.best_loss = avg_loss
 
-    write_to_file!(model, ontext.model_file * "_best.txt")
+    write_to_file!(model, context.model_file * "_best.txt")
   end
 end
 
