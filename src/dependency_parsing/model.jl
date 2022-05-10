@@ -224,9 +224,10 @@ function train!(model::Model, training_context::TrainingContext)
     model.output_layer = fmap(cu, model.output_layer)
   end
 
-  training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+30]
+  # training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+70]
+  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
 
-  train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences[begin:begin + 110], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+  train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
 
   train_epoch = () -> begin
     update_model!(model, train_samples, training_context)
@@ -411,9 +412,40 @@ function build_dataset(model, sentences_batch, training_context)
 
   println("Calculate weights")
 
+
+
   train_samples = map(train_samples) do sample
     gold = sample[end]
     gold_correct = findall(e -> e != 0, gold[begin, :])
+
+    repeat_number = if frequency[gold_correct] < 300
+      5
+    elseif frequency[gold_correct] < 600
+      3
+    else
+      1
+    end
+
+    frequency[gold_correct] += repeat_number - 1
+    for class in 1:length(gold[begin, :])
+      frequency_by_class[class] .+= (gold[:, class] .* (repeat_number - 1))
+    end
+
+    [(sample[begin], gold) for i in 1:repeat_number]
+  end |> Iterators.flatten |> collect
+
+  train_samples = map(train_samples) do sample
+    gold = sample[end]
+    gold_correct = findall(e -> e != 0, gold[begin, :])
+
+    repeat_number = if frequency[gold_correct] < 100
+      5
+    elseif frequency[gold_correct] < 300
+      3
+    else
+      1
+    end
+
     weight = 1 # / sqrt(frequency[gold_correct] / 2)
     weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
       pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...), pairs) |> 
@@ -425,14 +457,6 @@ function build_dataset(model, sentences_batch, training_context)
     end
 
     gold .*= weight_matrix
-
-    repeat_number = if frequency[gold_correct] < 100
-      1
-    elseif frequency[gold_correct] < 300
-      1
-    else
-      1
-    end
 
     [(sample[begin], gold, weight) for i in 1:repeat_number]
   end
@@ -470,9 +494,7 @@ function test_training_scores(model::Model, context::TrainingContext)
   end
 
   Threads.@sync begin
-    test_samples = Flux.DataLoader(build_dataset(model, context.test_connlu_sentences, context), batchsize=context.settings.sample_size, shuffle=true)
-
-    for sample in test_samples 
+    for sample in context.test_dataset
       Threads.@spawn parse_sample(sample)
     end
 
@@ -527,12 +549,13 @@ hidden bias
 softmax weights
 =#
 function write_to_file!(model::Model, filename::String)
+  embeddings = model.embeddings |> collect
   hidden_weight = model.hidden_layer.weight |> collect
   hidden_bias = model.hidden_layer.bias |> collect
   output_weight = model.output_layer.weight |> collect
 
   open(filename, "w") do file
-    embeddings_size = length(model.embeddings[begin, :])
+    embeddings_size = length(embeddings[begin, :])
 
     sort_by_value(pair) = pair[end]
     write(file, "$(length(model.word_ids)) $(length(model.tag_ids)) $(length(model.label_ids)) $(embeddings_size)\n")
@@ -543,7 +566,7 @@ function write_to_file!(model::Model, filename::String)
     )
 
     foreach(known_entities) do (entity, entity_id)
-      embedding = model.embeddings[entity_id, :]
+      embedding = embeddings[entity_id, :]
       write(file, "$(entity) $(join(embedding, " "))\n")
     end
 
