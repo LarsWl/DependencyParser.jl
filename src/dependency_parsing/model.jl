@@ -132,7 +132,7 @@ function calculate_hidden(model, input; dropout_active=false)
   for i in 1:batch_size
     offset = (i - 1) * embeddings_size
     hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
-    
+
     result += hidden_slice * input[i]
   end
 
@@ -188,7 +188,9 @@ function update_model!(model::Model, dataset, training_context::TrainingContext)
 
   loss = (sample) -> begin
     sum(sample) do (batch, gold, weight)
-      predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+      take_batch_embeddings(model, batch) |>
+        batch_emb -> predict_train(model, batch_emb) |>
+        scores -> weight * transition_loss(scores, gold)
     end + L2_norm(ps, training_context.settings)
   end
 
@@ -254,19 +256,25 @@ end
 # println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
 
 # using Random
-# data = shuffle(train_samples.data)[begin:begin+1000]
+# data = first(train_samples)
 
 # findall(d -> d[end][begin, begin] == 1, data) |> length
 # println(map(d -> findmax(d[2][begin, :])[end], data))
 # loss = (sample) -> begin
-#   sum(sample) do (batch, gold, weight)
-#     predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
-#   end + L2_norm(ps, training_context.settings)
-# end
+#     sum(sample) do (batch, gold, weight)
+#       take_batch_embeddings(model, batch) |>
+#         batch_emb -> predict_train(model, batch_emb) |>
+#         scores -> weight * transition_loss(scores, gold)
+#     end + L2_norm(ps, training_context.settings)
+#   end
 # ps = Flux.params(model)
 
-# @show data[begin][2]
-# predict_train(model, data[begin][begin])
+
+# @show data[begin][1] |> batch -> take_batch_embeddings(model, batch)
+
+# batch = data[begin][1] |> batch -> take_batch_embeddings(model, batch)
+# cu(rand(200, 100)) * batch[1]
+# predict_train(model, batch)
 # predict(model, data[begin + 3][begin])
 # loss([data[begin]])
 
@@ -292,7 +300,7 @@ end
 # training_context.system.transitions[7]
 # findmax(gold[begin, :])
 # println(loss(data))
-# for i in 1:3
+# for i in 1:1
 #   Flux.train!(loss, ps, [data], training_context.optimizer)
 # end
 # println(loss(data))
@@ -356,7 +364,7 @@ function build_dataset(model, sentences_batch, training_context)
       zero_transitions = zero_cost_transitions(gold_state)
       length(zero_transitions) == 0 && break
 
-      batch = form_batch(model, training_context.settings, config) |> batch -> take_batch_embeddings(model, batch)
+      batch = form_batch(model, training_context.settings, config)
       gold  = transition_costs(gold_state) |> gold_scores
       gold_correct = findall(e -> e == 1, gold[begin, :])
 
@@ -418,9 +426,11 @@ function build_dataset(model, sentences_batch, training_context)
     gold = sample[end]
     gold_correct = findall(e -> e != 0, gold[begin, :])
 
-    repeat_number = if frequency[gold_correct] < 300
-      5
+    repeat_number = if frequency[gold_correct] < 100
+      7
     elseif frequency[gold_correct] < 600
+      5
+    elseif frequency[gold_correct] < 1000
       3
     else
       1
@@ -438,17 +448,10 @@ function build_dataset(model, sentences_batch, training_context)
     gold = sample[end]
     gold_correct = findall(e -> e != 0, gold[begin, :])
 
-    repeat_number = if frequency[gold_correct] < 100
-      5
-    elseif frequency[gold_correct] < 300
-      3
-    else
-      1
-    end
-
     weight = 1 # / sqrt(frequency[gold_correct] / 2)
+    weight_coef_for_state = [1.5, 1, 2.5]
     weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
-      pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...), pairs) |> 
+      pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...) .* weight_coef_for_state, pairs) |> 
       vecs -> hcat(vecs...)
 
     if model.gpu_available
@@ -458,13 +461,13 @@ function build_dataset(model, sentences_batch, training_context)
 
     gold .*= weight_matrix
 
-    [(sample[begin], gold, weight) for i in 1:repeat_number]
+    (sample[begin], gold, weight)
   end
 
   println(frequency)
   println("Dataset builded...")
 
-  Iterators.flatten(train_samples) |> collect
+  train_samples
 end
 
 function test_training_scores(model::Model, context::TrainingContext)
@@ -533,7 +536,9 @@ function test_loss(model::Model, sample, context)
   ps = Flux.params(model)
 
   sum(sample) do (batch, gold, weight)
-    predict(model, batch) |> scores -> weight * transition_loss(scores, gold)
+    take_batch_embeddings(model, batch) |>
+      batch_emb -> predict(model, batch_emb) |>
+      scores -> weight * transition_loss(scores, gold)
   end + L2_norm(ps, context.settings)
 end
 

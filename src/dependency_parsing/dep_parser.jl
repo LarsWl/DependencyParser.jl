@@ -86,14 +86,12 @@ function default_train()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b2500_adagrad_c01_fl0_e100"
-  results_file = "tmp/results_b2500_adagrad_c01_fl0_e100"
+  model_file = "tmp/model_b5000_adagrad_c01_fl0_e100"
+  results_file = "tmp/results_b5000_adagrad_c01_fl0_e100"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
   model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache_e100-2", settings, system, embeddings_file, connlu_sentences)
-
-  model = Model(model_file * "_last.txt")
 
   sort(collect(model.label_ids), by=pair->pair[end]) |>
         pairs -> map(pair -> pair[begin], pairs) |>
