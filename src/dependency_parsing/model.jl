@@ -149,11 +149,15 @@ end
 
 function train_predict_tree(model::Model, sentence::Sentence, context::TrainingContext)
   config = Configuration(sentence)
+  transitions_number = 0
 
   while !is_terminal(config)
     transition = predict_transition(model, context.settings, context.system, config)
-    is_transition_valid(config, transition, context.system) || break
+    transition === nothing && break
     execute_transition(config, transition, context.system)
+
+    transitions_number += 1
+    transitions_number > LIMIT_TRANSITIONS_NUMBER && break
   end
 
   config.tree
@@ -168,7 +172,8 @@ function calculate_softmax(input)
 end
 
 function predict_train(model::Model, batch)
-  (calculate_hidden(model, batch, dropout_active = true) .^ 3) |>
+  take_batch_embeddings(model, batch) |>
+    batch_emb ->(calculate_hidden(model, batch_emb, dropout_active = true) .^ 3) |>
     Flux.normalise |>
     model.output_layer |>
     Flux.normalise |>
@@ -177,10 +182,15 @@ end
 
 
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
-  form_batch(model, settings, config) |> batch -> take_batch_embeddings(model, batch) |>
-    batch ->predict(model, batch) |>
-    scores -> findmax(scores[begin, :]) |>
-    max_score_with_index -> system.transitions[max_score_with_index[end]]
+  scores = form_batch(model, settings, config) |> batch -> take_batch_embeddings(model, batch) |>
+    batch -> predict(model, batch) |> collect |>
+    result -> filter(score -> score[end] > 0 && is_transition_valid(config, system.transitions[score[begin]], system), collect(enumerate(result[begin, :])))
+
+  length(scores) == 0 && return
+
+  score_index = findmax(map(score -> score[end], scores))[end]
+
+  system.transitions[scores[score_index][begin]]
 end
 
 function update_model!(model::Model, dataset, training_context::TrainingContext)
@@ -188,9 +198,7 @@ function update_model!(model::Model, dataset, training_context::TrainingContext)
 
   loss = (sample) -> begin
     sum(sample) do (batch, gold, weight)
-      take_batch_embeddings(model, batch) |>
-        batch_emb -> predict_train(model, batch_emb) |>
-        scores -> weight * transition_loss(scores, gold)
+      predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
     end + L2_norm(ps, training_context.settings)
   end
 
@@ -215,8 +223,7 @@ function transition_loss(scores, gold)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAGrad(0.01)
-  train_samples = []
+  training_context.optimizer = ADAM()
   model.gpu_available = CUDA.functional()
 
   if model.gpu_available
@@ -228,25 +235,30 @@ function train!(model::Model, training_context::TrainingContext)
 
   # training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+70]
   training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+  
+  raw_dataset = build_dataset(model, training_context.connlu_sentences, training_context)
+  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 4)), shuffle=true)
 
-  train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+  train_epoch = (datasets) -> begin
+    for dataset in datasets
+      samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
+      update_model!(model, samples, training_context)
 
-  train_epoch = () -> begin
-    update_model!(model, train_samples, training_context)
+      println("Dataset ends, start test")
+      test_training_scores(model, training_context)
 
-    GC.gc()
-    CUDA.reclaim()
-
-    println("Epocha ends, start test")
-    test_training_scores(model, training_context)
+      GC.gc()
+      CUDA.reclaim()
+    end
   end
 
-  Flux.@epochs 500 train_epoch()
+  Flux.@epochs 500 train_epoch(train_datasets)
 end
 
 # THERE IS A TEMP CODE USED FOR TRAINING THAT I RUN IN REPL
 
 # train_samples = Flux.DataLoader(build_dataset(model, training_context.connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+# train_samples.data |> length
 # println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
 # for i in 1:100
 #   train_samples = Flux.DataLoader(build_dataset(model, sentences_batch, training_context), batchsize=training_context.settings.sample_size)
@@ -262,21 +274,17 @@ end
 # println(map(d -> findmax(d[2][begin, :])[end], data))
 # loss = (sample) -> begin
 #     sum(sample) do (batch, gold, weight)
-#       take_batch_embeddings(model, batch) |>
-#         batch_emb -> predict_train(model, batch_emb) |>
-#         scores -> weight * transition_loss(scores, gold)
+#       predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
 #     end + L2_norm(ps, training_context.settings)
 #   end
 # ps = Flux.params(model)
 
-
-# @show data[begin][1] |> batch -> take_batch_embeddings(model, batch)
-
-# batch = data[begin][1] |> batch -> take_batch_embeddings(model, batch)
 # cu(rand(200, 100)) * batch[1]
 # predict_train(model, batch)
-# predict(model, data[begin + 3][begin])
+# predict(model, batch)
 # loss([data[begin]])
+
+# @show data[begin][2]
 
 
 # connlu_sentence = training_context.connlu_sentences[begin + 1]
@@ -317,33 +325,48 @@ end
 # end
 # @info sort(collect(loss_dict), by = pair -> pair[end])
 
-# CUDA.memory_status()
-# CUDA.reclaim()
-# GC.gc()
-# for i in 1:100
-#   Flux.train!(loss, ps, [[data[begin]]], training_context.optimizer)
+# loss_dict_2 = Dict()
+
+# false_positives = zeros(size(data[begin][2]))
+# false_negatives = zeros(size(data[begin][2]))
+# false_positives_with_transition = zeros(size(data[begin][2]))
+# false_negatives_with_transition = zeros(size(data[begin][2]))
+
+# foreach(data) do (batch, gold, weight)
+#   scores = take_batch_embeddings(model, batch) |> batch_emb -> predict(model, batch_emb) |> collect
+#   cpu_gold = gold |> collect
+
+#   for i in 1:length(scores[begin, :])
+#     for j in 1:length(scores[:, begin])
+#       if scores[j, i] > 0 && cpu_gold[j, i] == 0
+#         false_positives[j, i] += 1
+#       end
+#       if scores[j, i] == 0 && cpu_gold[j, i] > 0
+#         false_negatives[j, i] += 1
+#       end
+#     end
+#   end
 # end
+# @info sort(collect(loss_dict), by = pair -> pair[end])
 
-# calculate_hidden(model, batch) .^ 2 |> softmax
-# fmap(CuArray{Float64}, model.hidden_layer)
+# @show false_negatives
+# @show false_positives
+# system.transitions[18]
+# loss_dict_3 = Dict()
 
-# gs = gradient(ps) do
-#   loss(data)
+# foreach(data) do (batch, gold, weight)
+#   scores = predict_train(model, batch)
+
+  
+#   for i in 1:length(scores[begin, :])
+#     if haskey(loss_dict, i)
+#       loss_dict[i] += Flux.crossentropy(scores[:, i], gold[:, i])
+#     else
+#       loss_dict[i] = Flux.crossentropy(scores[:, i], gold[:, i])
+#     end
+#   end
 # end
-
-
-# gs |> collect
-
-# hidden_layer = Dense(settings.batch_size * 50, 10)
-# output_layer = Dense(10, 92, bias=false)
-# embeddings = model.embeddings[:, begin:begin + 49] |> collect
-# model2 = Model(embeddings, hidden_layer, output_layer, model.word_ids, model.tag_ids, model.label_ids)
-
-# model2.embeddings = cu(model2.embeddings)
-# model2.hidden_layer = fmap(cu, model2.hidden_layer)
-# model2.output_layer = fmap(cu, model2.output_layer)
-
-# system |> transitions_number
+# @info sort(collect(loss_dict_2), by = pair -> pair[end])
 
 function build_dataset(model, sentences_batch, training_context)
   train_samples = []
@@ -351,53 +374,42 @@ function build_dataset(model, sentences_batch, training_context)
   frequency_by_class = Dict()
   mutex = ReentrantLock()
   sent_mutex = ReentrantLock()
+  freq_mutex = ReentrantLock()
+  freq_bc_mutex = ReentrantLock()
   sentences_number = 0
 
+  for i in 1:transitions_number(training_context.system)
+    frequency_by_class[i] = [1, 1, 1]
+  end
+
   parse_gold_tree = (connlu_sentence) -> begin
+    batch = []
+
     sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-    transitions_number = 0
+
     config = Configuration(sentence)
+    process_config(model, config, connlu_sentence.gold_tree, training_context, 0, mutex, batch)
 
-    while !is_terminal(config)
-      gold_state = GoldState(connlu_sentence.gold_tree, config, training_context.system)
-
-      zero_transitions = zero_cost_transitions(gold_state)
-      length(zero_transitions) == 0 && break
-
-      batch = form_batch(model, training_context.settings, config)
-      gold  = transition_costs(gold_state) |> gold_scores
+    for (_, gold) in batch
       gold_correct = findall(e -> e == 1, gold[begin, :])
-
-      is_only_shift = length(zero_transitions) == 1 && gold[begin, begin] == 1
-      is_only_reduce = length(zero_transitions) == 1 && gold[begin + 1, begin] == 1
-
-      if !(is_only_shift || is_only_reduce) || rand(1:4) == 1
-        lock(mutex) do
-          if haskey(frequency, gold_correct)
-            frequency[gold_correct] += 1
-          else
-            frequency[gold_correct] = 1
-          end
-
-          for class in 1:length(gold[begin, :])
-            if !haskey(frequency_by_class, class)
-              frequency_by_class[class] = [1, 1, 1]
-            end
-
-            frequency_by_class[class] .+= gold[:, class]
-          end
-
-          push!(train_samples, (batch, gold))
+  
+      lock(freq_mutex) do 
+        if haskey(frequency, gold_correct)
+          frequency[gold_correct] += 1
+        else
+          frequency[gold_correct] = 1
         end
       end
-
-      transition = rand(zero_transitions)
-      execute_transition(config, transition, training_context.system)
-      transitions_number += 1
-      transitions_number >= LIMIT_TRANSITIONS_NUMBER && break
+      
+      lock(freq_bc_mutex) do 
+        for class in 1:transitions_number(training_context.system)
+          frequency_by_class[class] .+= gold[:, class]
+        end
+      end
     end
 
-    lock(sent_mutex) do 
+    lock(sent_mutex) do
+      train_samples = vcat(train_samples, batch)
       sentences_number += 1
       if sentences_number % 250 == 0
         println("Sentences processed: $sentences_number")
@@ -420,17 +432,15 @@ function build_dataset(model, sentences_batch, training_context)
 
   println("Calculate weights")
 
-
-
   train_samples = map(train_samples) do sample
     gold = sample[end]
     gold_correct = findall(e -> e != 0, gold[begin, :])
 
-    repeat_number = if frequency[gold_correct] < 100
+    repeat_number = if frequency[gold_correct] < 200
       7
     elseif frequency[gold_correct] < 600
       5
-    elseif frequency[gold_correct] < 1000
+    elseif frequency[gold_correct] < 900
       3
     else
       1
@@ -444,15 +454,23 @@ function build_dataset(model, sentences_batch, training_context)
     [(sample[begin], gold) for i in 1:repeat_number]
   end |> Iterators.flatten |> collect
 
-  train_samples = map(train_samples) do sample
-    gold = sample[end]
-    gold_correct = findall(e -> e != 0, gold[begin, :])
+  weight_coef_for_class = [1.2, 1.5, 1.6]
+  weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
+    pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...) .* weight_coef_for_class, pairs) |>
+    classes -> map(class -> class ./ min(class...), classes) |>
+    vecs -> hcat(vecs...)
+  if model.gpu_available
+    weight_matrix = cu(weight_matrix)
+  end
 
-    weight = 1 # / sqrt(frequency[gold_correct] / 2)
-    weight_coef_for_state = [1.5, 1, 2.5]
-    weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
-      pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...) .* weight_coef_for_state, pairs) |> 
-      vecs -> hcat(vecs...)
+  new_samples = []
+
+  Threads.@threads for i in 1:length(train_samples)
+    sample = train_samples[i]
+
+    gold = sample[end]
+
+    weight = 1
 
     if model.gpu_available
       gold = cu(gold)
@@ -461,13 +479,47 @@ function build_dataset(model, sentences_batch, training_context)
 
     gold .*= weight_matrix
 
-    (sample[begin], gold, weight)
+    lock(mutex) do
+      push!(new_samples, (sample[begin], gold, weight))
+    end
   end
 
   println(frequency)
   println("Dataset builded...")
 
-  train_samples
+  new_samples
+end
+
+function process_config(model, config, gold_tree, context, transition_number, mutex, train_samples)
+  is_terminal(config) && return
+  transition_number >= LIMIT_TRANSITIONS_NUMBER && return
+
+  gold_state = GoldState(gold_tree, config, context.system)
+  gold  = transition_costs(gold_state) |> gold_scores
+
+  zero_transitions = zero_cost_transitions(gold_state)
+  length(zero_transitions) == 0 && return
+
+  batch = form_batch(model, context.settings, config)
+  gold  = transition_costs(gold_state) |> gold_scores
+
+  lock(mutex) do 
+    push!(train_samples, (batch, gold))
+  end
+  
+  if rand(1:100) in 1:(context.beam_coef * 100)
+    foreach(zero_transitions) do transition
+      next_config = deepcopy(config)
+      execute_transition(next_config, transition, context.system)
+
+      process_config(model, next_config, gold_tree, context, transition_number + 1, mutex, train_samples)
+    end
+  else
+    transition = rand(zero_transitions)
+    execute_transition(config, transition, context.system)
+
+    process_config(model, config, gold_tree, context, transition_number + 1, mutex, train_samples)
+  end
 end
 
 function test_training_scores(model::Model, context::TrainingContext)
