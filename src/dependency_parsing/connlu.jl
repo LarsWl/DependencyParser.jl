@@ -11,17 +11,29 @@ struct ConnluSentence
 end
 
 function load_connlu_file(filename::String)
-  open(f -> read(f, String), filename) |> 
-    text -> split(text, r"# sent_id.+\n") |>
-    sentences_data -> filter(sentences_data -> length(sentences_data) > 1, sentences_data) |>
-    sentences_data -> map(sentence_data -> convert(sentence_data), sentences_data) |>
-    sentences_data -> map(sentence_data -> ConnluSentence(sentence_data[1], sentence_data[2], sentence_data[3], sentence_data[4]), sentences_data)
+  sentences = Vector{ConnluSentence}()
+
+  open(filename) do file
+    sentence_lines = []
+  
+    while !eof(file)
+      line = readline(file)
+  
+      if !occursin(r"^\s*$", line)
+        push!(sentence_lines, line)
+      else
+        convert(sentence_lines) |> sentence_data -> ConnluSentence(sentence_data...) |> sentence -> push!(sentences, sentence)
+        sentence_lines = []
+      end
+    end
+  end
+
+  sentences
 end
 
-function convert(sentence_data)
+function convert(lines)
   root = TreeNode(0)
-  lines = split(sentence_data, "\n")
-  words = filter(word -> (length(word) > 1) && !(occursin(r"# |(\d+-\d+)", word)), lines) .|> 
+  words = filter(word -> (length(word) > 1) && !(occursin(r"^(# |(\d+\-\d+)|(\d+\.\d+))", word)), lines) .|> 
       (word -> split(word, r"\t")) |>
       (words -> map(word -> [word[1], word[2], word[4], word[7], word[8]], words))
 

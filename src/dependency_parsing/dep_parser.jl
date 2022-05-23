@@ -74,7 +74,7 @@ function train!(train_file::String, test_file::String, results_file::String, mod
     test_file,
     results_file,
     model_file,
-    beam_coef = 0.05
+    beam_coef = 0
   )
 
   train!(model, training_context)
@@ -84,17 +84,17 @@ end
 
 function default_train()
   system = ArcEager.ArcEagerSystem()
-  train_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-train.conllu"
-  test_file = "F:\\ed_soft\\parser_materials\\UD_English-ParTUT-master\\en_partut-ud-dev.conllu"
+  train_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-train.conllu"
+  test_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
   model_file = "tmp/model_b5000_adam_c01_fl0_e100_beam"
   results_file = "tmp/results_b5000_adam_c01_fl0_e100_beam"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
-  model = cache_data((args...) -> Model(args[1], args[2], args[3], args[4]), "tmp/cache", "model_cache_e100-2", settings, system, embeddings_file, connlu_sentences)
+  model = cache_data((args...) -> Model(args...), "tmp/cache", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
 
-  model = Model(model_file * "_last.txt")
+  # model = Model(model_file * "_last.txt")
 
   sort(collect(model.label_ids), by=pair->pair[end]) |>
         pairs -> map(pair -> pair[begin], pairs) |>

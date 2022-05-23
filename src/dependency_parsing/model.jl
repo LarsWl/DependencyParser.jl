@@ -197,15 +197,70 @@ function update_model!(model::Model, dataset, training_context::TrainingContext)
   ps = Flux.params(model)
 
   loss = (sample) -> begin
-    sum(sample) do (batch, gold, weight)
-      predict_train(model, batch) |> scores -> weight * transition_loss(scores, gold)
+    sum(sample) do (batch, gold)
+      predict_train(model, batch) |> scores -> transition_loss(scores, gold)
     end + L2_norm(ps, training_context.settings)
   end
+  
+  test_sample = first(dataset)
 
-  evalcb = () -> @show test_loss(model, first(dataset), training_context)
+  evalcb = () -> begin
+   @show test_loss(model, test_sample, training_context)
+   CUDA.reclaim()
+  end
+
   throttle_cb = Flux.throttle(evalcb, 10)
 
-  Flux.train!(loss, ps, dataset, training_context.optimizer, cb = throttle_cb)
+  Flux.train!(loss, ps, dataset, training_context.optimizer, cb=throttle_cb)
+end
+
+function weighted_sample(model, sample, context)
+  new_sample = []
+  mutex = ReentrantLock()
+  frequency_by_class = Dict()
+  for i in 1:transitions_number(context.system)
+    frequency_by_class[i] = [1, 1, 1]
+  end
+
+  Threads.@threads for i in 1:length(sample)
+    batch, gold = sample[i]
+
+    for class in 1:transitions_number(context.system)
+      class_value = gold[:, class]
+
+      lock(mutex) do
+        frequency_by_class[class] .+= class_value
+      end
+    end
+  end
+
+  weight_coef_for_class = [1, 1.2, 1.2]
+
+  weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
+    pairs -> map(pair -> exp.(log.(5, (pair[end] .^ -1) .* max(pair[end]...))) .* weight_coef_for_class, pairs) |>
+    classes -> map(class -> class ./ min(class...), classes) |>
+    vecs -> hcat(vecs...)
+  if model.gpu_available
+    weight_matrix = cu(weight_matrix)
+  end
+
+  Threads.@threads for i in 1:length(sample)
+    batch, gold = sample[i]
+
+    if model.gpu_available
+      gold = cu(gold)
+    end
+
+    gold .*= weight_matrix
+
+    lock(mutex) do
+      push!(new_sample, (batch, gold))
+    end
+  end
+
+  try_unsafe_free(weight_matrix)
+
+  new_sample
 end
 
 function loss_function(entropy_sum, ps, settings::Settings)
@@ -227,24 +282,35 @@ function train!(model::Model, training_context::TrainingContext)
   model.gpu_available = CUDA.functional()
 
   if model.gpu_available
-    println("enable cuda")
+    @info "enable cuda"
     model.embeddings = cu(model.embeddings)
     model.hidden_layer = fmap(cu, model.hidden_layer)
     model.output_layer = fmap(cu, model.output_layer)
   end
 
   # training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+70]
-  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences, training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+300], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
   
   raw_dataset = build_dataset(model, training_context.connlu_sentences, training_context)
-  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 4)), shuffle=true)
+  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 6)), shuffle=true)
 
-  train_epoch = (datasets) -> begin
-    for dataset in datasets
-      samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
-      update_model!(model, samples, training_context)
+  @info "Calculate weightings..."
+  weighted_train_datasets = map(train_datasets) do dataset
+    samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
 
-      println("Dataset ends, start test")
+    weighted_dataset = map(sample -> weighted_sample(model, sample, training_context), samples)
+
+    weighted_dataset
+  end
+
+  train_epoch = () -> begin
+    for dataset in weighted_train_datasets
+      update_model!(model, dataset, training_context)
+
+      GC.gc()
+      CUDA.reclaim()
+
+      @info "Dataset ends, start test"
       test_training_scores(model, training_context)
 
       GC.gc()
@@ -252,7 +318,8 @@ function train!(model::Model, training_context::TrainingContext)
     end
   end
 
-  Flux.@epochs 500 train_epoch(train_datasets)
+  @info "Start training"
+  Flux.@epochs 500 train_epoch()
 end
 
 # THERE IS A TEMP CODE USED FOR TRAINING THAT I RUN IN REPL
@@ -268,7 +335,14 @@ end
 # println(sum(sent -> test_loss(model, sent, training_context), sentences_batch) / (sentences_batch |> length))
 
 # using Random
-# data = first(train_samples)
+# dataset = first(train_datasets)
+# data = first(Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true))
+
+# context = training_context
+# sample = data
+# sample = weighted_sample(model, data, training_context)
+
+# @show sample[1][2]
 
 # findall(d -> d[end][begin, begin] == 1, data) |> length
 # println(map(d -> findmax(d[2][begin, :])[end], data))
@@ -315,6 +389,7 @@ end
 
 # loss_dict = Dict()
 
+# data = first(training_context.test_dataset)
 # foreach(data) do (batch, gold, weight)
 #   correct = findall(e -> e != 0, gold[begin, :])
 #   if haskey(loss_dict, correct)
@@ -332,22 +407,23 @@ end
 # false_positives_with_transition = zeros(size(data[begin][2]))
 # false_negatives_with_transition = zeros(size(data[begin][2]))
 
-# foreach(data) do (batch, gold, weight)
+# foreach(training_context.test_dataset.data) do (batch, gold)
 #   scores = take_batch_embeddings(model, batch) |> batch_emb -> predict(model, batch_emb) |> collect
 #   cpu_gold = gold |> collect
 
 #   for i in 1:length(scores[begin, :])
 #     for j in 1:length(scores[:, begin])
-#       if scores[j, i] > 0 && cpu_gold[j, i] == 0
+#       if scores[j, i] > 0.33 && round(cpu_gold[j, i], RoundDown) == 0
 #         false_positives[j, i] += 1
 #       end
-#       if scores[j, i] == 0 && cpu_gold[j, i] > 0
+#       if scores[j, i] < 0.33 && round(cpu_gold[j, i], RoundDown) == 1
 #         false_negatives[j, i] += 1
 #       end
 #     end
 #   end
 # end
 # @info sort(collect(loss_dict), by = pair -> pair[end])
+# @info weight_matrix
 
 # @show false_negatives
 # @show false_positives
@@ -371,16 +447,10 @@ end
 function build_dataset(model, sentences_batch, training_context)
   train_samples = []
   frequency = Dict()
-  frequency_by_class = Dict()
   mutex = ReentrantLock()
   sent_mutex = ReentrantLock()
   freq_mutex = ReentrantLock()
-  freq_bc_mutex = ReentrantLock()
   sentences_number = 0
-
-  for i in 1:transitions_number(training_context.system)
-    frequency_by_class[i] = [1, 1, 1]
-  end
 
   parse_gold_tree = (connlu_sentence) -> begin
     batch = []
@@ -400,19 +470,13 @@ function build_dataset(model, sentences_batch, training_context)
           frequency[gold_correct] = 1
         end
       end
-      
-      lock(freq_bc_mutex) do 
-        for class in 1:transitions_number(training_context.system)
-          frequency_by_class[class] .+= gold[:, class]
-        end
-      end
     end
 
     lock(sent_mutex) do
       train_samples = vcat(train_samples, batch)
       sentences_number += 1
       if sentences_number % 250 == 0
-        println("Sentences processed: $sentences_number")
+        @info "Sentences processed: $sentences_number"
       end
     end
   end
@@ -420,7 +484,7 @@ function build_dataset(model, sentences_batch, training_context)
 
   try
     Threads.@sync begin
-      println("Build dataset...")
+      @info "Build dataset..."
       for connlu_sentence in sentences_batch
         Threads.@spawn parse_gold_tree(connlu_sentence)
       end
@@ -430,7 +494,7 @@ function build_dataset(model, sentences_batch, training_context)
     return err
   end
 
-  println("Calculate weights")
+  @info "Do some upsample...."
 
   train_samples = map(train_samples) do sample
     gold = sample[end]
@@ -447,47 +511,14 @@ function build_dataset(model, sentences_batch, training_context)
     end
 
     frequency[gold_correct] += repeat_number - 1
-    for class in 1:length(gold[begin, :])
-      frequency_by_class[class] .+= (gold[:, class] .* (repeat_number - 1))
-    end
 
     [(sample[begin], gold) for i in 1:repeat_number]
   end |> Iterators.flatten |> collect
 
-  weight_coef_for_class = [1.2, 1.5, 1.6]
-  weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
-    pairs -> map(pair -> (pair[end] .^ -1) .* max(pair[end]...) .* weight_coef_for_class, pairs) |>
-    classes -> map(class -> class ./ min(class...), classes) |>
-    vecs -> hcat(vecs...)
-  if model.gpu_available
-    weight_matrix = cu(weight_matrix)
-  end
+  @info frequency
+  @info "Dataset builded..."
 
-  new_samples = []
-
-  Threads.@threads for i in 1:length(train_samples)
-    sample = train_samples[i]
-
-    gold = sample[end]
-
-    weight = 1
-
-    if model.gpu_available
-      gold = cu(gold)
-      weight_matrix = cu(weight_matrix)
-    end
-
-    gold .*= weight_matrix
-
-    lock(mutex) do
-      push!(new_samples, (sample[begin], gold, weight))
-    end
-  end
-
-  println(frequency)
-  println("Dataset builded...")
-
-  new_samples
+  train_samples
 end
 
 function process_config(model, config, gold_tree, context, transition_number, mutex, train_samples)
@@ -541,7 +572,7 @@ function test_training_scores(model::Model, context::TrainingContext)
   end
 
   parse_sample = (sample) -> begin
-    loss = test_loss(model, sample, context)
+    loss = test_loss(model, weighted_sample(model, sample, context), context)
 
     lock(losses_mutex) do 
       push!(losses, loss)
@@ -587,10 +618,10 @@ end
 function test_loss(model::Model, sample, context)
   ps = Flux.params(model)
 
-  sum(sample) do (batch, gold, weight)
+  sum(sample) do (batch, gold)
     take_batch_embeddings(model, batch) |>
       batch_emb -> predict(model, batch_emb) |>
-      scores -> weight * transition_loss(scores, gold)
+      scores -> transition_loss(scores, gold)
   end + L2_norm(ps, context.settings)
 end
 
