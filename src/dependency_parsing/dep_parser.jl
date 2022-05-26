@@ -34,10 +34,15 @@ end
 function (parser::DepParser)(tokens_with_tags)
   sentence = Sentence(tokens_with_tags)
   config = Configuration(sentence)
+  transitions_number = 0
 
   while !is_terminal(config)
     transition = predict_transition(parser, config)
-    execute_transition(parser, config, transition) || return config.tree
+    transition === nothing && break
+    execute_transition(parser, config, transition)
+
+    transitions_number += 1
+    transitions_number > LIMIT_TRANSITIONS_NUMBER && break
   end
 
   config.tree
@@ -74,7 +79,7 @@ function train!(train_file::String, test_file::String, results_file::String, mod
     test_file,
     results_file,
     model_file,
-    beam_coef = 0
+    beam_coef = 0.05
   )
 
   train!(model, training_context)
@@ -87,12 +92,13 @@ function default_train()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b5000_adam_c01_fl0_e100_beam"
-  results_file = "tmp/results_b5000_adam_c01_fl0_e100_beam"
+  model_file = "tmp/model_b2000_adagrad_fl2_e100_beam_nt"
+  results_file = "tmp/results_b2000_adagrad_fl2_e100_beam_nt"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
-  model = cache_data((args...) -> Model(args...), "tmp/cache", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  model = cache_data((args...) -> Model(args...), "tmp/cache-new-target", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  enable_cuda(model)
 
   # model = Model(model_file * "_last.txt")
 

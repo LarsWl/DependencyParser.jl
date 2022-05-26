@@ -40,6 +40,8 @@ mutable struct Model
     model
   end
 
+  Flux.binary_focal_loss
+
 
   function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
     model = new()
@@ -57,8 +59,10 @@ mutable struct Model
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
-    model.output_layer = Dense(settings.hidden_size, transitions_number(system) * 3, bias=false)
+    model.output_layer = Dense(settings.hidden_size, transitions_number(system) * 2, bias=false)
     model.gpu_available = CUDA.functional()
+
+    enable_cuda(model)
     
     model
   end
@@ -112,12 +116,24 @@ mutable struct Model
 
     model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), word_ids, tag_ids, label_ids)
     model.gpu_available = CUDA.functional()
+    model.gpu_available = false
+
+    enable_cuda(model)
 
     model
   end
 end
 
 Flux.trainable(m::Model) = (m.embeddings, m.hidden_layer.weight, m.hidden_layer.bias, m.output_layer.weight,)
+
+function enable_cuda(model::Model)
+  if model.gpu_available
+    @info "enable cuda"
+    model.embeddings = cu(model.embeddings)
+    model.hidden_layer = fmap(cu, model.hidden_layer)
+    model.output_layer = fmap(cu, model.output_layer)
+  end
+end
 
 function calculate_hidden(model, input; dropout_active=false)
   result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
@@ -144,7 +160,8 @@ end
 function predict(model::Model, batch)
   (calculate_hidden(model, batch) .^ 3) |>
     model.output_layer |>
-    calculate_softmax
+    result -> reshape(result, 2, :) |>
+    softmax
 end
 
 function train_predict_tree(model::Model, sentence::Sentence, context::TrainingContext)
@@ -163,21 +180,14 @@ function train_predict_tree(model::Model, sentence::Sentence, context::TrainingC
   config.tree
 end
 
-function calculate_softmax(input)
-  offset = Int64(length(input[:, begin]) / 3)
-
-  res = [softmax(view(input, (i - 1) * 3 + 1:(i - 1) * 3 + 3)) for i in 1:offset] |> res -> hcat(res...) |> cu
-
-  res
-end
-
 function predict_train(model::Model, batch)
   take_batch_embeddings(model, batch) |>
     batch_emb ->(calculate_hidden(model, batch_emb, dropout_active = true) .^ 3) |>
     Flux.normalise |>
     model.output_layer |>
     Flux.normalise |>
-    calculate_softmax
+    result -> reshape(result, 2, :) |>
+    softmax
 end
 
 
@@ -214,55 +224,6 @@ function update_model!(model::Model, dataset, training_context::TrainingContext)
   Flux.train!(loss, ps, dataset, training_context.optimizer, cb=throttle_cb)
 end
 
-function weighted_sample(model, sample, context)
-  new_sample = []
-  mutex = ReentrantLock()
-  frequency_by_class = Dict()
-  for i in 1:transitions_number(context.system)
-    frequency_by_class[i] = [1, 1, 1]
-  end
-
-  Threads.@threads for i in 1:length(sample)
-    batch, gold = sample[i]
-
-    for class in 1:transitions_number(context.system)
-      class_value = gold[:, class]
-
-      lock(mutex) do
-        frequency_by_class[class] .+= class_value
-      end
-    end
-  end
-
-  weight_coef_for_class = [1, 1.2, 1.2]
-
-  weight_matrix = sort(collect(frequency_by_class), by=pair->pair[begin]) |>
-    pairs -> map(pair -> exp.(log.(5, (pair[end] .^ -1) .* max(pair[end]...))) .* weight_coef_for_class, pairs) |>
-    classes -> map(class -> class ./ min(class...), classes) |>
-    vecs -> hcat(vecs...)
-  if model.gpu_available
-    weight_matrix = cu(weight_matrix)
-  end
-
-  Threads.@threads for i in 1:length(sample)
-    batch, gold = sample[i]
-
-    if model.gpu_available
-      gold = cu(gold)
-    end
-
-    gold .*= weight_matrix
-
-    lock(mutex) do
-      push!(new_sample, (batch, gold))
-    end
-  end
-
-  try_unsafe_free(weight_matrix)
-
-  new_sample
-end
-
 function loss_function(entropy_sum, ps, settings::Settings)
   entropy_sum + L2_norm(ps, settings)
 end
@@ -274,38 +235,22 @@ function L2_norm(ps, settings::Settings)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.focal_loss(scores, gold, γ=0)
+  Flux.Losses.focal_loss(scores, gold, γ=2)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAM()
-  model.gpu_available = CUDA.functional()
+  training_context.optimizer = ADAGrad()
 
-  if model.gpu_available
-    @info "enable cuda"
-    model.embeddings = cu(model.embeddings)
-    model.hidden_layer = fmap(cu, model.hidden_layer)
-    model.output_layer = fmap(cu, model.output_layer)
-  end
-
-  # training_context.test_connlu_sentences = training_context.test_connlu_sentences[begin:begin+70]
   training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+300], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
   
   raw_dataset = build_dataset(model, training_context.connlu_sentences, training_context)
-  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 6)), shuffle=true)
-
-  @info "Calculate weightings..."
-  weighted_train_datasets = map(train_datasets) do dataset
-    samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
-
-    weighted_dataset = map(sample -> weighted_sample(model, sample, training_context), samples)
-
-    weighted_dataset
-  end
+  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 10)), shuffle=true)
 
   train_epoch = () -> begin
-    for dataset in weighted_train_datasets
-      update_model!(model, dataset, training_context)
+    for dataset in train_datasets
+      samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
+
+      update_model!(model, samples, training_context)
 
       GC.gc()
       CUDA.reclaim()
@@ -500,17 +445,21 @@ function build_dataset(model, sentences_batch, training_context)
     gold = sample[end]
     gold_correct = findall(e -> e != 0, gold[begin, :])
 
-    repeat_number = if frequency[gold_correct] < 200
+    repeat_number = if frequency[gold_correct] < 300
       7
-    elseif frequency[gold_correct] < 600
+    elseif frequency[gold_correct] < 700
       5
-    elseif frequency[gold_correct] < 900
+    elseif frequency[gold_correct] < 1000
       3
     else
       1
     end
 
     frequency[gold_correct] += repeat_number - 1
+    
+    if model.gpu_available
+      gold = cu(gold)
+    end
 
     [(sample[begin], gold) for i in 1:repeat_number]
   end |> Iterators.flatten |> collect
@@ -572,23 +521,27 @@ function test_training_scores(model::Model, context::TrainingContext)
   end
 
   parse_sample = (sample) -> begin
-    loss = test_loss(model, weighted_sample(model, sample, context), context)
+    loss = test_loss(model, sample, context)
 
     lock(losses_mutex) do 
       push!(losses, loss)
     end
   end
 
-  Threads.@sync begin
-    for sample in context.test_dataset
-      Threads.@spawn parse_sample(sample)
+  open(parsed_trees_file, "w") do file
+    Threads.@threads for i in length(context.test_connlu_sentences)
+      connlu_sentence = context.test_connlu_sentences[i]
+  
+      parse_tree(connlu_sentence, file)
     end
+  end
 
-    open(parsed_trees_file, "w") do file
-      foreach(context.test_connlu_sentences) do connlu_sentence
-        parse_tree(connlu_sentence, file)
-      end
-    end
+  test_dataset = context.test_dataset |> collect
+
+  Threads.@threads for i in length(test_dataset)
+    sample = test_dataset[i]
+
+    parse_sample(sample)
   end
     
   conllu_source = DependencyParserTest.Sources.ConlluSource(context.test_connlu_file)
@@ -816,12 +769,6 @@ function take_batch_embeddings(model, batch)
   take_embedding(word_index::Integer) = view(model.embeddings, word_index, :)
   batch = map(take_embedding, batch)
 
-  if model.gpu_available
-    # map(cu, batch)
-  else
-    batch
-  end
-
   batch
 end
 
@@ -835,77 +782,6 @@ end
 
 function get_label_id(model::Model, label::String)
   label == EMPTY_LABEL ? model.label_ids[NULL_TOKEN] : model.label_ids[label]
-end
-
-
-function take_corenlp_gradient(model, batch, costs, grads_dict, context)
-  sum1 = 0.0
-  sum2 = 0.0
-  hidden = calculate_hidden(model, take_batch_embeddings(model, batch), dropout_active=true)
-  cube_hidden = hidden .^ 3
-  scores = model.output_layer(cube_hidden) |> collect
-  costs = costs |> collect
-  max_score = findmax(scores)[begin]
-  gold = map(costs) do cost 
-    if cost == FORBIDDEN_COST
-      -1
-    elseif cost <= 0
-      1
-    else
-      0
-    end
-  end
-
-  hidden_weight_grad = grads_dict[model.hidden_layer.weight]
-  hidden_bias_grad = grads_dict[model.hidden_layer.bias]
-  output_weight_grad = grads_dict[model.output_layer.weight]
-  embeddings_grad = grads_dict[model.embeddings]
-
-  cube_hidden_grad = CUDA.zeros(Float64, size(cube_hidden))
-  
-  foreach(enumerate(costs)) do (index, cost)
-    if cost != FORBIDDEN_COST
-      scores[index] = exp(scores[index] - max_score)
-      if cost <= 0
-        sum1 += scores[index]
-      end
-      sum2 += scores[index]
-    end
-  end
-
-  for index = 1:length(costs)
-    if costs[index] != FORBIDDEN_COST
-      delta = -(gold[index] - scores[index] / sum2) / context.settings.sample_size;
-
-      output_weight = view(model.output_layer.weight, index, :)
-      
-      view(output_weight_grad, index, :) .+= (cube_hidden .* delta)
-      cube_hidden_grad .+= (delta .* output_weight)
-    end
-  end
-
-  hidden_grad = cube_hidden_grad .* 3  + (hidden .^ 2);
-  hidden_bias_grad .+= hidden_grad
-
-  embeddings_size = context.settings.embeddings_size
-
-  for index = 1:context.settings.batch_size
-    word_index = batch[index]
-    embedding = cu(model.embeddings[word_index, :])
-    offset = (index - 1) * embeddings_size
-
-    cpu_hidden_grad = hidden_grad |> collect
-
-    for node_index = 1:length(hidden)
-      view(hidden_weight_grad, node_index, (offset + 1) : (offset + embeddings_size)) .+= embedding .* cpu_hidden_grad[node_index]
-      view(embeddings_grad, word_index, :) .+= view(model.hidden_layer.weight, node_index, (offset + 1) : (offset + embeddings_size)) .* cpu_hidden_grad[node_index]
-    end
-  end
-
-  CUDA.unsafe_free!(hidden)
-  CUDA.unsafe_free!(cube_hidden)
-  CUDA.unsafe_free!(cube_hidden_grad)
-  CUDA.unsafe_free!(hidden_grad)
 end
 
 function try_unsafe_free(x)
