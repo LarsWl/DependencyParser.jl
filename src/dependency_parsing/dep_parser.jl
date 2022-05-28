@@ -92,15 +92,18 @@ function default_train()
   train_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-train.conllu"
   test_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-dev.conllu"
   embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b2000_adagrad_fl2_e100_beam_nt"
-  results_file = "tmp/results_b2000_adagrad_fl2_e100_beam_nt"
+  model_file = "tmp/model_b3000_adamax_fl2_e100_beam_nt_2"
+  results_file = "tmp/results_b3000_adamax_fl2_e100_beam_nt_2"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
-  model = cache_data((args...) -> Model(args...), "tmp/cache-new-target", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  model = cache_data((args...) -> Model(args...), "tmp/cache-new-target-2", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
   enable_cuda(model)
+  
+  model = Model(model_file * "_last.txt")
 
-  # model = Model(model_file * "_last.txt")
+  model = Model("tmp/model_b3000_adam_fl2_e100_beam_nt_2_last.txt")
+  enable_cuda(model)
 
   sort(collect(model.label_ids), by=pair->pair[end]) |>
         pairs -> map(pair -> pair[begin], pairs) |>

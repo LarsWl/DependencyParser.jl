@@ -15,12 +15,8 @@ end
 
 function gold_scores(costs::Vector{Int64})
   map(costs) do cost 
-    if cost <= 0
-      [1, 0]
-    else
-      [0, 1]
-    end
-  end |> scores -> hcat(scores...) # .* weight_mask(costs)
+    cost <= 0 ? 1 : 0
+  end |> vec -> reshape(vec, 1, :)
 end
 
 function weight_mask(costs)

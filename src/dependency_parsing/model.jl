@@ -26,6 +26,7 @@ mutable struct Model
   tag_ids::Dict{String, Integer}
   label_ids::Dict{String, Integer}
   gpu_available
+  hidden_accumulator
 
   function Model(
     embeddings,
@@ -39,9 +40,6 @@ mutable struct Model
     model.gpu_available = CUDA.functional()
     model
   end
-
-  Flux.binary_focal_loss
-
 
   function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
     model = new()
@@ -59,10 +57,8 @@ mutable struct Model
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
-    model.output_layer = Dense(settings.hidden_size, transitions_number(system) * 2, bias=false)
+    model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false, sigmoid)
     model.gpu_available = CUDA.functional()
-
-    enable_cuda(model)
     
     model
   end
@@ -114,10 +110,11 @@ mutable struct Model
       output_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
     end
 
-    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), word_ids, tag_ids, label_ids)
-    model.gpu_available = CUDA.functional()
-    model.gpu_available = false
+    hidden_accumulator = zeros(Float32, hidden_size)
 
+    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false, sigmoid), word_ids, tag_ids, label_ids, undef, hidden_accumulator)
+    model.gpu_available = CUDA.functional()
+    
     enable_cuda(model)
 
     model
@@ -132,14 +129,12 @@ function enable_cuda(model::Model)
     model.embeddings = cu(model.embeddings)
     model.hidden_layer = fmap(cu, model.hidden_layer)
     model.output_layer = fmap(cu, model.output_layer)
+    model.hidden_accumulator = cu(model.hidden_accumulator)
   end
 end
 
 function calculate_hidden(model, input; dropout_active=false)
-  result = zeros(Float64, length(model.hidden_layer.weight[:, begin]))
-  if model.gpu_available
-    result = cu(result)
-  end
+  fill!(model.hidden_accumulator, zero(Float32))
 
   embeddings_size = length(model.embeddings[begin, :])
   batch_size = length(input)
@@ -149,19 +144,18 @@ function calculate_hidden(model, input; dropout_active=false)
     offset = (i - 1) * embeddings_size
     hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
 
-    result += hidden_slice * input[i]
+    model.hidden_accumulator .+= hidden_slice * input[i]
   end
 
-  result += model.hidden_layer.bias
+  model.hidden_accumulator .+= model.hidden_layer.bias
 
-  Flux.dropout(result, 0.5, active = dropout_active, dims = 1)
+  Flux.dropout(model.hidden_accumulator, 0.5, active = dropout_active, dims = 1)
 end
 
 function predict(model::Model, batch)
   (calculate_hidden(model, batch) .^ 3) |>
     model.output_layer |>
-    result -> reshape(result, 2, :) |>
-    softmax
+    result -> reshape(result, 1, :)
 end
 
 function train_predict_tree(model::Model, sentence::Sentence, context::TrainingContext)
@@ -185,16 +179,14 @@ function predict_train(model::Model, batch)
     batch_emb ->(calculate_hidden(model, batch_emb, dropout_active = true) .^ 3) |>
     Flux.normalise |>
     model.output_layer |>
-    Flux.normalise |>
-    result -> reshape(result, 2, :) |>
-    softmax
+    result -> reshape(result, 1, :)
 end
 
 
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
   scores = form_batch(model, settings, config) |> batch -> take_batch_embeddings(model, batch) |>
     batch -> predict(model, batch) |> collect |>
-    result -> filter(score -> score[end] > 0 && is_transition_valid(config, system.transitions[score[begin]], system), collect(enumerate(result[begin, :])))
+    result -> filter(score -> score[end] > 0 && is_transition_valid(config, system.transitions[score[begin]], system), collect(enumerate(result)))
 
   length(scores) == 0 && return
 
@@ -235,13 +227,18 @@ function L2_norm(ps, settings::Settings)
 end
 
 function transition_loss(scores, gold)
-  Flux.Losses.focal_loss(scores, gold, γ=2)
+  Flux.Losses.binary_focal_loss(scores, gold, γ=2)
 end
 
-function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAGrad()
+function test_transition_loss(scores, gold)
+  Flux.Losses.binarycrossentropy(scores, gold)
+end
 
-  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+300], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
+
+function train!(model::Model, training_context::TrainingContext)
+  training_context.optimizer = ADAM()
+
+  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+800], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
   
   raw_dataset = build_dataset(model, training_context.connlu_sentences, training_context)
   train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 10)), shuffle=true)
@@ -298,14 +295,26 @@ end
 #   end
 # ps = Flux.params(model)
 
+# batch, gold = data[begin]
+
+# gold
 # cu(rand(200, 100)) * batch[1]
 # predict_train(model, batch)
-# predict(model, batch)
+# predict(model, take_batch_embeddings(model, batch))
+
+# test_transition_loss(predict(model, take_batch_embeddings(model, batch)), gold)
+
 # loss([data[begin]])
 
 # @show data[begin][2]
 
 
+# [[1], [0], [1]] |> vecs -> hcat(vecs...)
+
+# m = Dense(200, 100, bias = false, sigmoid)
+# vec = rand(200)
+
+# m(vec)
 # connlu_sentence = training_context.connlu_sentences[begin + 1]
 # sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
 # config = Configuration(sentence)
@@ -406,7 +415,7 @@ function build_dataset(model, sentences_batch, training_context)
     process_config(model, config, connlu_sentence.gold_tree, training_context, 0, mutex, batch)
 
     for (_, gold) in batch
-      gold_correct = findall(e -> e == 1, gold[begin, :])
+      gold_correct = findall(e -> e == 1, gold)
   
       lock(freq_mutex) do 
         if haskey(frequency, gold_correct)
@@ -443,7 +452,7 @@ function build_dataset(model, sentences_batch, training_context)
 
   train_samples = map(train_samples) do sample
     gold = sample[end]
-    gold_correct = findall(e -> e != 0, gold[begin, :])
+    gold_correct = findall(e -> e != 0, gold)
 
     repeat_number = if frequency[gold_correct] < 300
       7
@@ -481,7 +490,6 @@ function process_config(model, config, gold_tree, context, transition_number, mu
   length(zero_transitions) == 0 && return
 
   batch = form_batch(model, context.settings, config)
-  gold  = transition_costs(gold_state) |> gold_scores
 
   lock(mutex) do 
     push!(train_samples, (batch, gold))
@@ -529,7 +537,7 @@ function test_training_scores(model::Model, context::TrainingContext)
   end
 
   open(parsed_trees_file, "w") do file
-    Threads.@threads for i in length(context.test_connlu_sentences)
+    for i in 1:length(context.test_connlu_sentences)
       connlu_sentence = context.test_connlu_sentences[i]
   
       parse_tree(connlu_sentence, file)
@@ -538,7 +546,7 @@ function test_training_scores(model::Model, context::TrainingContext)
 
   test_dataset = context.test_dataset |> collect
 
-  Threads.@threads for i in length(test_dataset)
+  for i in 1:length(test_dataset)
     sample = test_dataset[i]
 
     parse_sample(sample)
@@ -573,8 +581,8 @@ function test_loss(model::Model, sample, context)
 
   sum(sample) do (batch, gold)
     take_batch_embeddings(model, batch) |>
-      batch_emb -> predict(model, batch_emb) |>
-      scores -> transition_loss(scores, gold)
+    batch_emb -> predict(model, batch_emb) |>
+      scores -> test_transition_loss(scores, gold)
   end + L2_norm(ps, context.settings)
 end
 
