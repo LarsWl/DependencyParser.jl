@@ -58,6 +58,8 @@ mutable struct Model
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
     model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false, sigmoid)
+    model.hidden_accumulator = zeros(Float32, settings.hidden_size)
+
     model.gpu_available = CUDA.functional()
     
     model
@@ -133,7 +135,7 @@ function enable_cuda(model::Model)
   end
 end
 
-function calculate_hidden(model, input; dropout_active=false)
+function calculate_hidden(model, input)
   fill!(model.hidden_accumulator, zero(Float32))
 
   embeddings_size = length(model.embeddings[begin, :])
@@ -149,7 +151,30 @@ function calculate_hidden(model, input; dropout_active=false)
 
   model.hidden_accumulator .+= model.hidden_layer.bias
 
-  Flux.dropout(model.hidden_accumulator, 0.5, active = dropout_active, dims = 1)
+  model.hidden_accumulator
+end
+
+# some of operators in calculate_hidden not compilable for Zygote
+function calculate_hidden_train(model, input)
+  result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
+  if model.gpu_available
+    result = cu(result)
+  end
+
+  embeddings_size = length(model.embeddings[begin, :])
+  batch_size = length(input)
+  hidden_weight = model.hidden_layer.weight
+
+  for i in 1:batch_size
+    offset = (i - 1) * embeddings_size
+    hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
+
+    result += hidden_slice * input[i]
+  end
+
+  result += model.hidden_layer.bias
+
+  Flux.dropout(result, 0.5, dims = 1)
 end
 
 function predict(model::Model, batch)
@@ -176,7 +201,7 @@ end
 
 function predict_train(model::Model, batch)
   take_batch_embeddings(model, batch) |>
-    batch_emb ->(calculate_hidden(model, batch_emb, dropout_active = true) .^ 3) |>
+    batch_emb ->(calculate_hidden_train(model, batch_emb) .^ 3) |>
     Flux.normalise |>
     model.output_layer |>
     result -> reshape(result, 1, :)
@@ -284,6 +309,8 @@ end
 # sample = data
 # sample = weighted_sample(model, data, training_context)
 
+# update_model!(model, [data], training_context)
+
 # @show sample[1][2]
 
 # findall(d -> d[end][begin, begin] == 1, data) |> length
@@ -296,6 +323,8 @@ end
 # ps = Flux.params(model)
 
 # batch, gold = data[begin]
+
+# batch
 
 # gold
 # cu(rand(200, 100)) * batch[1]
@@ -717,14 +746,14 @@ end
 
 #=
 while batch_size only is 48 there is structure of batch
-1-18 - word_ids
-19-36 - tag_ids
-37-48 - label_ids
+1-12 - word_ids
+13-24 - tag_ids
+25-32 - label_ids
 =#
-const POS_OFFSET = 18
-const LABEL_OFFSET = 36
-const STACK_OFFSET = 6
-const STACK_NUMBER = 6
+const POS_OFFSET = 12
+const LABEL_OFFSET = 24
+const STACK_OFFSET = 4
+const STACK_NUMBER = 4
 
 function form_batch(model::Model, settings::Settings, config::Configuration)
   batch = zeros(Integer, settings.batch_size)
@@ -733,42 +762,37 @@ function form_batch(model::Model, settings::Settings, config::Configuration)
   tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(model, tag)
   label_id_by_word_index(word_index::Integer) = get_label(config, word_index) |> label -> get_label_id(model, label)
 
-  # add top three stack elements and top three buffers elems with their's tags
-  for i = 1:3
+  # add top two stack elements and top two buffers elems with their's tags
+  for i = 1:2
     stack_word_index = get_stack_element(config, i)
     buffer_word_index = get_buffer_element(config, i)
 
     batch[i] = word_id_by_word_index(stack_word_index)
     batch[i + POS_OFFSET] = tag_id_by_word_index(stack_word_index)
-    batch[i + 3] = word_id_by_word_index(buffer_word_index)
-    batch[i + POS_OFFSET + 3] = tag_id_by_word_index(buffer_word_index)
+    batch[i + 2] = word_id_by_word_index(buffer_word_index)
+    batch[i + POS_OFFSET + 2] = tag_id_by_word_index(buffer_word_index)
   end
 
   #=
     Add: 
-    The first and second leftmost / rightmost children of the top two words on the stack and
-    The leftmost of leftmost / rightmost of rightmost children of the top two words on the stack
+    The first and second leftmost / rightmost children of the first stack and buffer element
   =#
-  for stack_id = 1:2
-    stack_word_index = get_stack_element(config, stack_id)
 
-    set_word_data_by_index_with_offset = function (word_index::Integer, additional_offset)
-      batch[STACK_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = word_id_by_word_index(word_index)
-      batch[STACK_OFFSET + POS_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = tag_id_by_word_index(word_index)
-      batch[LABEL_OFFSET + (stack_id - 1) * STACK_NUMBER + additional_offset] = label_id_by_word_index(word_index)
-    end
-
-    get_left_child(config.tree, stack_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, 1)
-    get_right_child(config.tree, stack_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, 2)
-    get_left_child(config.tree, stack_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, 3)
-    get_right_child(config.tree, stack_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, 4)
-    get_left_child(config.tree, stack_word_index) |> 
-      word_index -> get_left_child(config.tree, word_index) |>
-      word_index -> set_word_data_by_index_with_offset(word_index, 5)
-    get_right_child(config.tree, stack_word_index) |> 
-      word_index -> get_right_child(config.tree, word_index) |>
-      word_index -> set_word_data_by_index_with_offset(word_index, 6)
+  set_word_data_by_index_with_offset = function (word_index::Integer, additional_offset)
+    batch[STACK_OFFSET + additional_offset] = word_id_by_word_index(word_index)
+    batch[STACK_OFFSET + POS_OFFSET + additional_offset] = tag_id_by_word_index(word_index)
+    batch[LABEL_OFFSET + additional_offset] = label_id_by_word_index(word_index)
   end
+
+  set_children_data = (config_word_index, offset_number) -> begin
+    get_left_child(config.tree, config_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 1)
+    get_right_child(config.tree, config_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 2)
+    get_left_child(config.tree, config_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 3)
+    get_right_child(config.tree, config_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 4)
+  end
+
+  set_children_data(get_stack_element(config, 1), 0)
+  set_children_data(get_buffer_element(config, 1), 1)
   
   batch
 end

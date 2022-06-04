@@ -12,8 +12,8 @@ struct Pipeline
   Pipeline(;
     sentence_splitter =  SentenceSplitter(), 
     tokenizer = Tokenizer(), 
-    pos_tagger = POSTagger("tmp\\pos_model_2.bson"), 
-    dep_parser = DepParser(DependencyParsing.Settings(), "tmp/model_b3000_adam_fl2_e100_beam_nt_2_best.txt")
+    pos_tagger = POSTagger("tmp\\pos_model"), 
+    dep_parser = DepParser(DependencyParsing.Settings(), "tmp/success/model_b3000_adamax_fl2_e100_beam_nt_2_best.txt")
   ) = new(sentence_splitter, tokenizer, pos_tagger, dep_parser)
 end
 
