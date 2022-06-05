@@ -11,5 +11,6 @@ module DependencyParsing
   include("arc_eager/arc_eager.jl")
   include("training_context.jl")
   include("model.jl")
+  include("model_training.jl")
   include("dep_parser.jl")
 end
