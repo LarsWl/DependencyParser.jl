@@ -10,7 +10,7 @@ struct Settings
   Settings(;
     embeddings_size::Integer=300,
     hidden_size::Integer=200,
-    batch_size::Integer=48,
+    batch_size::Integer=32,
     reg_weight=1e-8,
     sample_size=3000,
   ) = new(embeddings_size, hidden_size, batch_size, reg_weight, sample_size)

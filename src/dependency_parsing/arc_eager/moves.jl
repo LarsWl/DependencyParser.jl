@@ -4,18 +4,24 @@ export cost, is_valid, transition, valid_moves
 using ..DependencyParsing
 
 module Moves
-  const SHIFT = 'S'
-  const REDUCE = 'D'
-  const RIGHT = 'R'
-  const LEFT = 'L'
-  const BREAK = 'B'
+  const SHIFT = "S"
+  const REDUCE = "D"
+  const RIGHT = "R"
+  const LEFT = "L"
 end
 
-struct Shift <: Move end;
-struct Reduce <: Move end;
-struct RightArc <: Move end;
-struct LeftArc <: Move end;
-struct Break <: Move end;
+struct Shift <: Move
+  code_name::String
+end
+struct Reduce <: Move
+  code_name::String
+end
+struct RightArc <: Move
+  code_name::String
+end
+struct LeftArc <: Move
+  code_name::String
+end
 
 #=
   Cost: push_cost 
@@ -206,38 +212,4 @@ function transition(config::Configuration, label::String, move::LeftArc)
   has_head(config.tree, dependent) && del_arc(config.tree, dependent)
   add_arc(config, head, dependent, label)
   set_reshiftable(config, dependent)
-end
-
-
-
-# Not sure that i need this Move
-
-function cost(config::Configuration, move::Break, system::ArcEagerSystem)
-end
-
-#=
-Validity:
-  * len(buffer) >= 2
-  * B[1] == B[0] + 1
-  * not is_sent_start(B[1])
-  * not cannot_sent_start(B[1])
-=#
-function is_valid(config::Configuration, move::Break)
-  if buffer_length(config) < 2
-    return false
-  elseif config.buffer[begin] != config.buffer[begin + 1]
-    return false
-  else
-    return true
-  end
-end
-
-#Mark the second word of the buffer as the start of a sentence. 
-function transition(config::Configuration, label::String, move::Break)
-end
-
-function valid_moves(config::Configuration)
-  moves = Move[Shift(), Reduce(), RightArc(), LeftArc()]
-
-  filter(move -> is_valid(config, move), moves)
 end

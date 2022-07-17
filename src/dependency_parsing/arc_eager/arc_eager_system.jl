@@ -17,11 +17,11 @@ end
 function set_labels!(system::ArcEagerSystem, labels::Vector{String})
   transitions = Vector{Transition}()
     
-  push!(transitions, Transition(Shift(), EMPTY_LABEL))
-  push!(transitions, Transition(Reduce(), EMPTY_LABEL))
+  push!(transitions, Transition(Shift(Moves.SHIFT), EMPTY_LABEL))
+  push!(transitions, Transition(Reduce(Moves.REDUCE), EMPTY_LABEL))
 
   foreach(labels) do label
-    for move in [LeftArc(), RightArc()]
+    for move in [LeftArc(Moves.LEFT), RightArc(Moves.RIGHT)]
       push!(transitions, Transition(move, label))
     end
   end

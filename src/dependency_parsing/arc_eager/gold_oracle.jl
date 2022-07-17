@@ -1,27 +1,28 @@
-export zero_cost_transitions, transition_costs, gold_scores
+export have_zero_cost_transitions, transition_costs, optimal_transition_index
 using Flux
 
-function zero_cost_transitions(state::GoldState)
-  filter(trans -> is_valid(state.config, trans.move) && cost(state, trans.move, trans.label) <= 0, state.system.transitions)
+function have_zero_cost_transitions(state::GoldState)
+  filter(trans -> is_valid(state.config, trans.move) && cost(state, trans.move, trans.label) <= 0, state.system.transitions) |>
+   length |>
+   len -> len > 0
 end
 
 
-# I inverse cost& because I need to zero cost transitions have best value after softmax
+function optimal_transition_index(costs::Vector{Int64}, system::ArcEagerSystem)
+  min_index = 1
+  
+  foreach(enumerate(costs)) do (index, cost)
+    move_code_mame = system.transitions[index].move.code_name
+    if cost < costs[min_index] || cost == costs[min_index] && (move_code_mame == Moves.LEFT || move_code_mame == Moves.RIGHT)
+      min_index = index
+    end
+  end
+
+  min_index
+end
+
 function transition_costs(state::GoldState)
   map(state.system.transitions) do trans
     is_valid(state.config, trans.move) ? cost(state, trans.move, trans.label) : FORBIDDEN_COST
   end
-end
-
-function gold_scores(costs::Vector{Int64})
-  map(costs) do cost 
-    cost <= 0 ? 1 : 0
-  end |> vec -> reshape(vec, 1, :)
-end
-
-function weight_mask(costs)
-  shift_weights = [1, 1, 2]
-  other_weights = [[2, 1, 2] for i in 1:(length(costs) - 1)]
-
-  hcat(shift_weights, other_weights...)
 end

@@ -1,8 +1,7 @@
 export Model
-export write_to_file!, predict, loss_function, update_model!, update_model!_2
+export write_to_file!, predict
 
-import .ArcEager: transitions_number, set_labels!, execute_transition, zero_cost_transitions, transition_costs, gold_scores, is_transition_valid
-import .ArcEager: GoldState, FORBIDDEN_COST
+import .ArcEager: transitions_number, set_labels!
 
 using Flux, CUDA
 using Zygote
@@ -57,7 +56,7 @@ mutable struct Model
     match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
-    model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false, sigmoid)
+    model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false)
     model.hidden_accumulator = zeros(Float32, settings.hidden_size)
 
     model.gpu_available = CUDA.functional()
@@ -114,7 +113,7 @@ mutable struct Model
 
     hidden_accumulator = zeros(Float32, hidden_size)
 
-    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false, sigmoid), word_ids, tag_ids, label_ids, undef, hidden_accumulator)
+    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), word_ids, tag_ids, label_ids, undef, hidden_accumulator)
     model.gpu_available = CUDA.functional()
     
     enable_cuda(model)
@@ -154,62 +153,15 @@ function calculate_hidden(model, input)
   model.hidden_accumulator
 end
 
-# some of operators in calculate_hidden not compilable for Zygote
-function calculate_hidden_train(model, input)
-  result = zeros(Float32, length(model.hidden_layer.weight[:, begin]))
-  if model.gpu_available
-    result = cu(result)
-  end
-
-  embeddings_size = length(model.embeddings[begin, :])
-  batch_size = length(input)
-  hidden_weight = model.hidden_layer.weight
-
-  for i in 1:batch_size
-    offset = (i - 1) * embeddings_size
-    hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
-
-    result += hidden_slice * input[i]
-  end
-
-  result += model.hidden_layer.bias
-
-  Flux.dropout(result, 0.5, dims = 1)
-end
-
 function predict(model::Model, batch)
-  (calculate_hidden(model, batch) .^ 3) |>
-    model.output_layer |>
-    result -> reshape(result, 1, :)
-end
-
-function train_predict_tree(model::Model, sentence::Sentence, context::TrainingContext)
-  config = Configuration(sentence)
-  transitions_number = 0
-
-  while !is_terminal(config)
-    transition = predict_transition(model, context.settings, context.system, config)
-    transition === nothing && break
-    execute_transition(config, transition, context.system)
-
-    transitions_number += 1
-    transitions_number > LIMIT_TRANSITIONS_NUMBER && break
-  end
-
-  config.tree
-end
-
-function predict_train(model::Model, batch)
   take_batch_embeddings(model, batch) |>
-    batch_emb ->(calculate_hidden_train(model, batch_emb) .^ 3) |>
-    Flux.normalise |>
+    batch_emb -> (calculate_hidden(model, batch_emb) .^ 3) |>
     model.output_layer |>
-    result -> reshape(result, 1, :)
+    softmax
 end
-
 
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
-  scores = form_batch(model, settings, config) |> batch -> take_batch_embeddings(model, batch) |>
+  scores = form_batch(model, settings, config) |>
     batch -> predict(model, batch) |> collect |>
     result -> filter(score -> score[end] > 0 && is_transition_valid(config, system.transitions[score[begin]], system), collect(enumerate(result)))
 
@@ -218,263 +170,6 @@ function predict_transition(model::Model, settings::Settings, system::ParsingSys
   score_index = findmax(map(score -> score[end], scores))[end]
 
   system.transitions[scores[score_index][begin]]
-end
-
-function update_model!(model::Model, dataset, training_context::TrainingContext)
-  ps = Flux.params(model)
-
-  loss = (sample) -> begin
-    sum(sample) do (batch, gold)
-      predict_train(model, batch) |> scores -> transition_loss(scores, gold)
-    end + L2_norm(ps, training_context.settings)
-  end
-  
-  test_sample = first(dataset)
-
-  evalcb = () -> begin
-   @show test_loss(model, test_sample, training_context)
-   CUDA.reclaim()
-  end
-
-  throttle_cb = Flux.throttle(evalcb, 10)
-
-  Flux.train!(loss, ps, dataset, training_context.optimizer, cb=throttle_cb)
-end
-
-function loss_function(entropy_sum, ps, settings::Settings)
-  entropy_sum + L2_norm(ps, settings)
-end
-
-function L2_norm(ps, settings::Settings)
-  sqnorm(x) = sum(abs2, x)
-
-  sum(sqnorm, ps) * (settings.reg_weight / 2)
-end
-
-function transition_loss(scores, gold)
-  Flux.Losses.binary_focal_loss(scores, gold, γ=2)
-end
-
-function test_transition_loss(scores, gold)
-  Flux.Losses.binarycrossentropy(scores, gold)
-end
-
-
-function train!(model::Model, training_context::TrainingContext)
-  training_context.optimizer = ADAM()
-
-  training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+800], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
-  
-  raw_dataset = build_dataset(model, training_context.connlu_sentences, training_context)
-  train_datasets = Flux.DataLoader(raw_dataset, batchsize=Int64(round(length(raw_dataset) / 10)), shuffle=true)
-
-  train_epoch = () -> begin
-    for dataset in train_datasets
-      samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
-
-      update_model!(model, samples, training_context)
-
-      GC.gc()
-      CUDA.reclaim()
-
-      @info "Dataset ends, start test"
-      test_training_scores(model, training_context)
-
-      GC.gc()
-      CUDA.reclaim()
-    end
-  end
-
-  @info "Start training"
-  Flux.@epochs 500 train_epoch()
-end
-
-function build_dataset(model, sentences_batch, training_context)
-  train_samples = []
-  frequency = Dict()
-  mutex = ReentrantLock()
-  sent_mutex = ReentrantLock()
-  freq_mutex = ReentrantLock()
-  sentences_number = 0
-
-  parse_gold_tree = (connlu_sentence) -> begin
-    batch = []
-
-    sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-
-    config = Configuration(sentence)
-    process_config(model, config, connlu_sentence.gold_tree, training_context, 0, mutex, batch)
-
-    for (_, gold) in batch
-      gold_correct = findall(e -> e == 1, gold)
-  
-      lock(freq_mutex) do 
-        if haskey(frequency, gold_correct)
-          frequency[gold_correct] += 1
-        else
-          frequency[gold_correct] = 1
-        end
-      end
-    end
-
-    lock(sent_mutex) do
-      train_samples = vcat(train_samples, batch)
-      sentences_number += 1
-      if sentences_number % 250 == 0
-        @info "Sentences processed: $sentences_number"
-      end
-    end
-  end
-
-
-  try
-    Threads.@sync begin
-      @info "Build dataset..."
-      for connlu_sentence in sentences_batch
-        Threads.@spawn parse_gold_tree(connlu_sentence)
-      end
-    end
-  catch err
-    println(err.task.exception)
-    return err
-  end
-
-  @info "Do some upsample...."
-
-  train_samples = map(train_samples) do sample
-    gold = sample[end]
-    gold_correct = findall(e -> e != 0, gold)
-
-    repeat_number = if frequency[gold_correct] < 300
-      7
-    elseif frequency[gold_correct] < 700
-      5
-    elseif frequency[gold_correct] < 1000
-      3
-    else
-      1
-    end
-
-    frequency[gold_correct] += repeat_number - 1
-    
-    if model.gpu_available
-      gold = cu(gold)
-    end
-
-    [(sample[begin], gold) for i in 1:repeat_number]
-  end |> Iterators.flatten |> collect
-
-  @info frequency
-  @info "Dataset builded..."
-
-  train_samples
-end
-
-function process_config(model, config, gold_tree, context, transition_number, mutex, train_samples)
-  is_terminal(config) && return
-  transition_number >= LIMIT_TRANSITIONS_NUMBER && return
-
-  gold_state = GoldState(gold_tree, config, context.system)
-  gold  = transition_costs(gold_state) |> gold_scores
-
-  zero_transitions = zero_cost_transitions(gold_state)
-  length(zero_transitions) == 0 && return
-
-  batch = form_batch(model, context.settings, config)
-
-  lock(mutex) do 
-    push!(train_samples, (batch, gold))
-  end
-  
-  if rand(1:100) in 1:(context.beam_coef * 100)
-    foreach(zero_transitions) do transition
-      next_config = deepcopy(config)
-      execute_transition(next_config, transition, context.system)
-
-      process_config(model, next_config, gold_tree, context, transition_number + 1, mutex, train_samples)
-    end
-  else
-    transition = rand(zero_transitions)
-    execute_transition(config, transition, context.system)
-
-    process_config(model, config, gold_tree, context, transition_number + 1, mutex, train_samples)
-  end
-end
-
-function test_training_scores(model::Model, context::TrainingContext)
-  losses = []
-  parsed_trees_file = "tmp/parsed_trees.txt"
-  mutex = ReentrantLock()
-  losses_mutex = ReentrantLock()
-  parse_tree = (connlu_sentence, file) -> begin
-    sentence = zip(connlu_sentence.token_doc.tokens, connlu_sentence.pos_tags) |> collect |> Sentence
-
-    tree = train_predict_tree(model, sentence, context)
-    tree_text = convert_to_string(tree)
-
-    lock(mutex) do 
-      write(file, tree_text)
-      write(file, "\n")
-      write(file, "\n")
-    end
-  end
-
-  parse_sample = (sample) -> begin
-    loss = test_loss(model, sample, context)
-
-    lock(losses_mutex) do 
-      push!(losses, loss)
-    end
-  end
-
-  open(parsed_trees_file, "w") do file
-    for i in 1:length(context.test_connlu_sentences)
-      connlu_sentence = context.test_connlu_sentences[i]
-  
-      parse_tree(connlu_sentence, file)
-    end
-  end
-
-  test_dataset = context.test_dataset |> collect
-
-  for i in 1:length(test_dataset)
-    sample = test_dataset[i]
-
-    parse_sample(sample)
-  end
-    
-  conllu_source = DependencyParserTest.Sources.ConlluSource(context.test_connlu_file)
-  parser_source = DependencyParserTest.Sources.CoreNLPSource(parsed_trees_file)
-
-  uas, las = DependencyParserTest.Benchmark.test_accuracy(conllu_source, parser_source)
-  best_loss = min(losses...)
-  worst_loss = max(losses...)
-  avg_loss = sum(losses) / length(losses)
-
-  open(context.training_results_file, "a") do file
-    result_line = "UAS=$(uas), LAS=$(las), best_loss=$(best_loss), worst_loss=$(worst_loss), avg_loss=$(avg_loss)\n"
-    write(file, result_line)
-  end
-
-  write_to_file!(model, context.model_file * "_last.txt")
-
-  if uas > context.best_uas || (uas == context.best_uas && las > context.best_las)
-    context.best_uas = uas
-    context.best_las = las
-    context.best_loss = avg_loss
-
-    write_to_file!(model, context.model_file * "_best.txt")
-  end
-end
-
-function test_loss(model::Model, sample, context)
-  ps = Flux.params(model)
-
-  sum(sample) do (batch, gold)
-    take_batch_embeddings(model, batch) |>
-    batch_emb -> predict(model, batch_emb) |>
-      scores -> test_transition_loss(scores, gold)
-  end + L2_norm(ps, context.settings)
 end
 
 #=
