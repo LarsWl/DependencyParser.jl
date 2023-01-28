@@ -42,7 +42,7 @@ function (pipeline::Pipeline)(text)
 end
 
 function pipeline_test(connlu_file)
-  text = DependencyParserTest.Converting.extract_sentences_from_conllu(connlu_file)
+#  text = .Converting.extract_sentences_from_conllu(connlu_file)
   text = replace(text, r"[éè]" => "e")
   text = replace(text, r"[ô]" => "o")
   pipe = Pipeline()

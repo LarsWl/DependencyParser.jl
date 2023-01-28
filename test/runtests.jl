@@ -1,7 +1,7 @@
 using DependencyParser
-using Test
 using DataStructures
 using Flux
+using Test
 
 # FACTORIES
 

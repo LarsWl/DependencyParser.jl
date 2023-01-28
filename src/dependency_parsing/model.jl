@@ -7,6 +7,8 @@ using Flux, CUDA
 using Zygote
 using JLD2
 using DependencyParserTest
+using Embeddings
+using BSON
 
 #=
   Input layer dimension: batch_size * embeddings_size
@@ -40,22 +42,21 @@ mutable struct Model
     model
   end
 
-  function Model(settings::Settings, system::ParsingSystem, embeddings_file::String, connlu_sentences::Vector{ConnluSentence})
+  function Model(settings::Settings, system::ParsingSystem, connlu_sentences::Vector{ConnluSentence})
     model = new()
 
-    loaded_embeddings, embedding_ids = read_embeddings_file(embeddings_file)
-    embeddings_size = length(loaded_embeddings[begin, :])
-    if embeddings_size != settings.embeddings_size
+    pretrained = load_embeddings(GloVe{:en}, 2, max_vocab_size=250_000)
+    if size(pretrained.embeddings)[begin]!= settings.embeddings_size
       ArgumentError("Incorrect embeddings dimensions. Given: $(embeddings_size). In settings: $(settings.embeddings_size)") |> throw
     end
   
     set_corpus_data!(model, connlu_sentences)
     set_labels!(system, model.label_ids |> keys |> collect)
 
-    model.embeddings = rand(Float64, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), embeddings_size)
-    match_embeddings!(model.embeddings, loaded_embeddings, embedding_ids, model.word_ids |> keys |> collect)
+    model.embeddings = rand(Float64, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), settings.embeddings_size)
+    match_embeddings!(model.embeddings, pretrained, model.word_ids |> keys |> collect)
   
-    model.hidden_layer = Dense(settings.batch_size * embeddings_size, settings.hidden_size)
+    model.hidden_layer = Dense(settings.batch_size * settings.embeddings_size, settings.hidden_size)
     model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false)
     model.hidden_accumulator = zeros(Float32, settings.hidden_size)
 
@@ -63,64 +64,9 @@ mutable struct Model
     
     model
   end
-
-  function Model(model_file::String)
-    lines = readlines(model_file)
-    info_line = lines[begin]
-    words_count, tags_count, labels_count, embeddings_size = split(info_line, " ") |> info_values -> map(value -> parse(Int32, value), info_values)
-    total_ids_count =  words_count + tags_count + labels_count
-
-    word_ids = Dict{String, Integer}()
-    tag_ids = Dict{String, Integer}()
-    label_ids = Dict{String, Integer}()
-    embeddings = Matrix{Float64}(undef, total_ids_count, embeddings_size)
-
-    # read all embeddings for words, tags and labels
-    for i = 1:total_ids_count
-      line = lines[i + 1]
-      entity, embedding = split(line) |> values -> [values[begin], map(value -> parse(Float64, value), values[begin+1:end])]
-      embeddings[i, :] = embedding
-
-      # Depend on index define entity as word or as tag or as label
-      if 1 <= i <= words_count
-        word_ids[entity] = i
-      elseif words_count < i <= words_count + tags_count
-        tag_ids[entity] = i
-      else
-        label_ids[entity] = i
-      end
-    end
-
-    info_line = lines[total_ids_count + 2]
-    batch_size, hidden_size, labels_num = split(info_line) |> info_values -> map(value -> parse(Int32, value), info_values)
-
-    hidden_layer = Matrix{Float64}(undef, hidden_size, batch_size * embeddings_size)
-    output_layer = Matrix{Float64}(undef, labels_num, hidden_size)
-
-    # read hidden layer weights and bias
-    for i = 1:hidden_size
-      line = lines[i + total_ids_count + 2]
-      hidden_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
-    end
-    hidden_bias_line = lines[begin + total_ids_count + hidden_size + 2]
-    hidden_bias = split(hidden_bias_line) |> values -> map(value -> parse(Float64, value), values)
-
-    # read softmax layer weights
-    for i = 1:labels_num
-      line = lines[i + total_ids_count + hidden_size + 3]
-      output_layer[i, :] = split(line) |> values -> map(value -> parse(Float64, value), values)
-    end
-
-    hidden_accumulator = zeros(Float32, hidden_size)
-
-    model = new(embeddings, Dense(hidden_layer, hidden_bias), Dense(output_layer, false), word_ids, tag_ids, label_ids, undef, hidden_accumulator)
-    model.gpu_available = CUDA.functional()
-    
-    enable_cuda(model)
-
-    model
-  end
 end
+
+save(m::Model, file_path::String) = BSON.save(file_path, Dict(:model => m))
 
 Flux.trainable(m::Model) = (m.embeddings, m.hidden_layer.weight, m.hidden_layer.bias, m.output_layer.weight,)
 
@@ -172,95 +118,18 @@ function predict_transition(model::Model, settings::Settings, system::ParsingSys
   system.transitions[scores[score_index][begin]]
 end
 
-#=
-File structure
-known_words_count known_pos_tags_count known_labels_count embeddings_size
-words embeddings
-pos_tags embeddings
-labels embeddings
-batch_size hidden_size label_nums
-hidden weights
-hidden bias
-softmax weights
-=#
-function write_to_file!(model::Model, filename::String)
-  embeddings = model.embeddings |> collect
-  hidden_weight = model.hidden_layer.weight |> collect
-  hidden_bias = model.hidden_layer.bias |> collect
-  output_weight = model.output_layer.weight |> collect
-
-  open(filename, "w") do file
-    embeddings_size = length(embeddings[begin, :])
-
-    sort_by_value(pair) = pair[end]
-    write(file, "$(length(model.word_ids)) $(length(model.tag_ids)) $(length(model.label_ids)) $(embeddings_size)\n")
-    known_entities = vcat(
-      sort(collect(model.word_ids), by = sort_by_value),
-      sort(collect(model.tag_ids), by = sort_by_value),
-      sort(collect(model.label_ids), by = sort_by_value)
-    )
-
-    foreach(known_entities) do (entity, entity_id)
-      embedding = embeddings[entity_id, :]
-      write(file, "$(entity) $(join(embedding, " "))\n")
-    end
-
-    hidden_size = length(hidden_weight[:, begin])
-    labels_num = length(output_weight[:, begin])
-    batch_size = Int32(length(hidden_weight[begin, :]) / embeddings_size)
-
-    write(file, "$(batch_size) $(hidden_size) $(labels_num)\n")
-
-    for i = 1:hidden_size
-      write(file, join(hidden_weight[i, :], " "))
-      write(file, "\n")
-    end
-
-    write(file, join(hidden_bias, " "))
-    write(file, "\n")
-
-    for i = 1:labels_num
-      write(file, join(output_weight[i, :], " "))
-      write(file, "\n")
-    end
-  end
-end
-
-function read_embeddings_file(filename::String)
-  lines = readlines(filename)
-  words_count, dimension = split(lines[begin]) |> (numbers -> map(number -> parse(Int64, number), numbers))
-  deleteat!(lines, 1)
-
-  embeddings = zeros(Float64, words_count, dimension)
-  embedding_ids = Dict{String, Integer}()
-
-  foreach(enumerate(lines)) do (index, line)
-    splitted = split(line, " ")
-    word = line[begin]
-    embedding_ids[string(word)] = index
-
-    for i = 1:dimension
-      embeddings[index, i] = parse(Float64, splitted[i + 1])
-    end
-  end
-
-  [embeddings, embedding_ids]
-end
-
-function match_embeddings!(embeddings::Matrix{Float64}, loaded_embeddings::Matrix{Float64}, embedding_ids::Dict{String, Integer}, known_words::Vector{String})
+function match_embeddings!(embeddings::Matrix{Float64}, pretrained, known_words::Vector{String})
   embeddings_size = size(embeddings)[end]
   
   foreach(enumerate(known_words)) do (index, word)
-    embedding_id = if haskey(embedding_ids, word)
-      embedding_ids[word]
-    elseif haskey(embedding_ids, lowercase(word))
-      embedding_ids[lowercase(word)]
+    embedding_id = if word in pretrained.vocab
+      findfirst(==(word), pretrained.vocab)
     else
       0
     end
 
     if embedding_id > 0
-      embeddings[index, :] = loaded_embeddings[embedding_id, :]
+      embeddings[index, :] = pretrained.embeddings[:, embedding_id]
     else
       embeddings[index, :] = [rand(-100:100) / 10000.0 for i in 1:embeddings_size]
     end
@@ -302,7 +171,7 @@ function set_corpus_data!(model::Model, connlu_sentences::Vector{ConnluSentence}
 end
 
 #=
-while batch_size only is 48 there is structure of batch
+while batch_size only is 32 there is structure of batch
 1-12 - word_ids
 13-24 - tag_ids
 25-32 - label_ids

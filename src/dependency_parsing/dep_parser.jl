@@ -79,7 +79,7 @@ function train!(train_file::String, test_file::String, results_file::String, mod
     test_file,
     results_file,
     model_file,
-    beam_coef = 0.05
+    beam_coef = 0.2
   )
 
   train!(model, training_context)
@@ -89,17 +89,16 @@ end
 
 function default_train()
   system = ArcEager.ArcEagerSystem()
-  train_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-train.conllu"
-  test_file = "F:\\ed_soft\\parser_materials\\UD_English-EWT-master\\en_ewt-ud-dev.conllu"
-  embeddings_file = "F:\\ed_soft\\parser_materials\\model.txt"
-  model_file = "tmp/model_b3000_adam_fl2_e100_beam_new_oracle"
-  results_file = "tmp/results_b3000_adam_fl2_e100_beam_new_oracle"
+  train_file = "/home/egor/UD_English-EWT/en_ewt-ud-train.conllu"
+  test_file = "/home/egor/UD_English-EWT/en_ewt-ud-dev.conllu"
+  model_file = "tmp/model_v1.bson"
+  results_file = "tmp/results_v1"
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
-  model = cache_data((args...) -> Model(args...), "tmp/cache", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  model = Model(settings, system, connlu_sentences)
   # model.gpu_available = false
-  enable_cuda(model)
+  # enable_cuda(model)
 
   # model = Model(model_file * "_last.txt")
 
@@ -112,4 +111,67 @@ end
 
 function predict_transition(parser::DepParser, config::Configuration)
   predict_transition(parser.model, parser.settings, parser.parsing_system, config)
+end
+
+function init_dataset()
+  fetch_cache("ewt_processed_dataset") do 
+    system = ArcEager.ArcEagerSystem()
+    train_file = "/home/egor/UD_English-EWT/en_ewt-ud-train.conllu"
+    test_file = "/home/egor/UD_English-EWT/en_ewt-ud-dev.conllu"
+    model_file = "tmp/model_v1.bson"
+    results_file = "tmp/results_v1"
+
+    connlu_sentences = load_connlu_file(train_file)
+    settings = Settings(embeddings_size=100)
+    model = Model(settings, system, connlu_sentences)
+    # model.gpu_available = false
+    # enable_cuda(model)
+
+    # model = Model(model_file * "_last.txt")
+
+    sort(collect(model.label_ids), by=pair->pair[end]) |>
+      pairs -> map(pair -> pair[begin], pairs) |>
+      labels -> set_labels!(system, labels)
+
+    test_sentences = load_connlu_file(test_file)
+
+    training_context = TrainingContext(
+      system,
+      settings,
+      train_file,
+      connlu_sentences,
+      test_sentences,
+      test_file,
+      results_file,
+      model_file,
+      beam_coef = 0.05
+    )
+
+    cache_file_path = "tmp/cache/dataset.jld2"
+    dataset_parts = Flux.DataLoader(connlu_sentences, batchsize=500)
+
+    dataset_index = 1
+    for dataset_part in dataset_parts
+      GC.gc()
+
+      processed_dataset_part = build_dataset(model, dataset_part, training_context)
+
+      cache_key = "dataset_part_$dataset_index"
+
+      write_cache(cache_key, processed_dataset_part;file_path=cache_file_path)
+
+      dataset_index += 1
+    end
+
+    @info "Merging dataset parts..."
+    dataset = []
+    dataset_index = 1
+    for i in 1:20
+      cache_key = "dataset_part_$i"
+      part = read_cache(cache_key,;file_path=cache_file_path)
+      dataset = vcat(dataset, part)
+    end
+
+    dataset
+  end
 end

@@ -1,21 +1,37 @@
-export cache_data
+export fetch_cache, write_cache, read_cache
 
 using JLD2
 
-function cache_data(func::Function, filename::String, path::String, args...; kwargs...)
+const DEFAULT_CACHE_PATH = joinpath(@__DIR__, "..", "..", "tmp", "cache", "cache.jld2")
+
+function fetch_cache(func::Function, cache_key; file_path=DEFAULT_CACHE_PATH)
   local prepared = nothing
-  if isfile(filename)
-    jldopen(filename, "r") do file
-      if haskey(file, path)
-        prepared = file[path]
+
+  if isfile(file_path)
+    jldopen(file_path, "r") do file
+      if haskey(file, cache_key)
+        prepared = file[cache_key]
       end
     end
   end
   if isnothing(prepared)
-    prepared = func(args...; kwargs...)
-    jldopen(filename, "a+") do file
-      file[path] = prepared
+    prepared = func()
+    jldopen(file_path, "a+") do file
+      file[cache_key] = prepared
     end
   end
-  return prepared
+  
+  prepared
+end
+
+function write_cache(key, data; file_path=DEFAULT_CACHE_PATH)
+  jldopen(file_path, "a+") do file
+    file[key] = data
+  end
+end
+
+function read_cache(key; file_path=DEFAULT_CACHE_PATH)
+  jldopen(file_path, "a+") do file
+    file[key]
+  end
 end

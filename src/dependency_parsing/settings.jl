@@ -8,7 +8,7 @@ struct Settings
   sample_size::Integer
 
   Settings(;
-    embeddings_size::Integer=300,
+    embeddings_size::Integer=100,
     hidden_size::Integer=300,
     batch_size::Integer=32,
     reg_weight=1e-7,
