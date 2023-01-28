@@ -58,8 +58,8 @@ function update_model!(model::Model, dataset, training_context::TrainingContext)
 
     loss = (sample) -> begin
         sum(sample) do (batch, gold)
-            predict_train(model, batch) |> scores -> transition_loss(scores, gold)
-        end + L2_norm(ps, training_context.settings)
+            predict_train(model, batch) |> scores -> transition_loss(scores, gold) + L2_norm(ps, training_context.settings)
+        end
     end
 
     test_sample = first(dataset)
@@ -89,7 +89,7 @@ function test_transition_loss(scores, gold)
 end
 
 function train!(model::Model, training_context::TrainingContext)
-    training_context.optimizer = ADAM()
+    training_context.optimizer = ADAM(0.01)
 
     training_context.test_dataset = Flux.DataLoader(build_dataset(model, training_context.test_connlu_sentences[begin:begin+1200], training_context), batchsize=training_context.settings.sample_size, shuffle=true)
 

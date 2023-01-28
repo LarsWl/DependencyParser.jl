@@ -97,7 +97,8 @@ function default_train()
 
   connlu_sentences = load_connlu_file(train_file)
   settings = Settings(embeddings_size=100)
-  model = cache_data((args...) -> Model(args...), "tmp/cache-new-oracle", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  model = cache_data((args...) -> Model(args...), "tmp/cache", "model_cache_e100-ewt", settings, system, embeddings_file, connlu_sentences)
+  # model.gpu_available = false
   enable_cuda(model)
 
   # model = Model(model_file * "_last.txt")
