@@ -24,7 +24,7 @@ mutable struct TrainingContext
         test_connlu_file::String,
         training_results_file::String,
         model_file::String;
-        beam_coef = 0.05
+        beam_coef = 0.05,
     ) = 
     new(
         system, 

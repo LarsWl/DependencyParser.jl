@@ -7,7 +7,13 @@ end
 
 function gold_scores(costs::Vector{Int64})
   map(costs) do cost 
-    cost <= 0 ? 1 : 0
+    if cost <= 0
+      1
+    elseif cost == FORBIDDEN_COST
+      -1
+    else
+      0
+    end
   end |> vec -> reshape(vec, 1, :)
 end
 

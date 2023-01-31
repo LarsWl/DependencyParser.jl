@@ -5,6 +5,7 @@ using ..DependencyParser.Units
 import .ArcEager: execute_transition
 
 using TextAnalysis
+using StatsBase
 
 struct DepParser <: AbstractDepParser
   settings::Settings

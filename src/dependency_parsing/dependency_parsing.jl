@@ -12,5 +12,6 @@ module DependencyParsing
   include("training_context.jl")
   include("model.jl")
   include("model_training.jl")
+  include("corenlp_training.jl")
   include("dep_parser.jl")
 end

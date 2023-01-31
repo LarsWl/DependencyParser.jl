@@ -66,7 +66,7 @@ mutable struct Model
   end
 end
 
-save(m::Model, file_path::String) = BSON.save(file_path, Dict(:model => m))
+save(m::Model, file_path::String) = bson(file_path, Dict(:model => m))
 
 Flux.trainable(m::Model) = (m.embeddings, m.hidden_layer.weight, m.hidden_layer.bias, m.output_layer.weight,)
 
