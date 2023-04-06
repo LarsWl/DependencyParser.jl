@@ -125,10 +125,6 @@ function init_dataset()
     connlu_sentences = load_connlu_file(train_file)
     settings = Settings(embeddings_size=100)
     model = Model(settings, system, connlu_sentences)
-    # model.gpu_available = false
-    # enable_cuda(model)
-
-    # model = Model(model_file * "_last.txt")
 
     sort(collect(model.label_ids), by=pair->pair[end]) |>
       pairs -> map(pair -> pair[begin], pairs) |>
@@ -148,31 +144,6 @@ function init_dataset()
       beam_coef = 0.05
     )
 
-    cache_file_path = "tmp/cache/dataset.jld2"
-    dataset_parts = Flux.DataLoader(connlu_sentences, batchsize=500)
-
-    dataset_index = 1
-    for dataset_part in dataset_parts
-      GC.gc()
-
-      processed_dataset_part = build_dataset(model, dataset_part, training_context)
-
-      cache_key = "dataset_part_$dataset_index"
-
-      write_cache(cache_key, processed_dataset_part;file_path=cache_file_path)
-
-      dataset_index += 1
-    end
-
-    @info "Merging dataset parts..."
-    dataset = []
-    dataset_index = 1
-    for i in 1:20
-      cache_key = "dataset_part_$i"
-      part = read_cache(cache_key,;file_path=cache_file_path)
-      dataset = vcat(dataset, part)
-    end
-
-    dataset
+    build_dataset(model, connlu_sentences, training_context)
   end
 end

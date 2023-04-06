@@ -23,6 +23,7 @@ mutable struct Model
   embeddings
   hidden_layer::Dense
   output_layer::Dense
+  dropout::Dropout
   word_ids::Dict{String, Integer}
   tag_ids::Dict{String, Integer}
   label_ids::Dict{String, Integer}
@@ -58,6 +59,7 @@ mutable struct Model
   
     model.hidden_layer = Dense(settings.batch_size * settings.embeddings_size, settings.hidden_size)
     model.output_layer = Dense(settings.hidden_size, transitions_number(system), bias=false)
+    model.dropout = Dropout(0.5)
     model.hidden_accumulator = zeros(Float32, settings.hidden_size)
 
     model.gpu_available = CUDA.functional()
@@ -91,7 +93,7 @@ function calculate_hidden(model, input)
     offset = (i - 1) * embeddings_size
     hidden_slice = view(hidden_weight, :, (offset + 1) : (offset + embeddings_size))
 
-    model.hidden_accumulator .+= hidden_slice * input[i]
+    model.hidden_accumulator .+= hidden_slice * model.embeddings[input[i], :]
   end
 
   model.hidden_accumulator .+= model.hidden_layer.bias
@@ -100,10 +102,7 @@ function calculate_hidden(model, input)
 end
 
 function predict(model::Model, batch)
-  take_batch_embeddings(model, batch) |>
-    batch_emb -> (calculate_hidden(model, batch_emb) .^ 3) |>
-    model.output_layer |>
-    softmax
+  calculate_hidden(model, batch) .^ 3 |> model.output_layer |> softmax
 end
 
 function predict_transition(model::Model, settings::Settings, system::ParsingSystem, config::Configuration)
@@ -171,15 +170,15 @@ function set_corpus_data!(model::Model, connlu_sentences::Vector{ConnluSentence}
 end
 
 #=
-while batch_size only is 32 there is structure of batch
-1-12 - word_ids
-13-24 - tag_ids
-25-32 - label_ids
+while batch_size only is 48 there is structure of batch
+1-18 - word_ids
+19-36 - tag_ids
+37-48 - label_ids
 =#
-const POS_OFFSET = 12
-const LABEL_OFFSET = 24
-const STACK_OFFSET = 4
-const STACK_NUMBER = 4
+const POS_OFFSET = 18
+const LABEL_OFFSET = 36
+const STACK_OFFSET = 6
+const STACK_NUMBER = 6
 
 function form_batch(model::Model, settings::Settings, config::Configuration)
   batch = zeros(Integer, settings.batch_size)
@@ -188,15 +187,15 @@ function form_batch(model::Model, settings::Settings, config::Configuration)
   tag_id_by_word_index(word_index::Integer) = get_tag(config, word_index) |> tag -> get_tag_id(model, tag)
   label_id_by_word_index(word_index::Integer) = get_label(config, word_index) |> label -> get_label_id(model, label)
 
-  # add top two stack elements and top two buffers elems with their's tags
-  for i = 1:2
+  # add top three stack elements and top three buffers elems with their's tags
+  for i = 1:3
     stack_word_index = get_stack_element(config, i)
     buffer_word_index = get_buffer_element(config, i)
 
     batch[i] = word_id_by_word_index(stack_word_index)
     batch[i + POS_OFFSET] = tag_id_by_word_index(stack_word_index)
-    batch[i + 2] = word_id_by_word_index(buffer_word_index)
-    batch[i + POS_OFFSET + 2] = tag_id_by_word_index(buffer_word_index)
+    batch[i + 3] = word_id_by_word_index(buffer_word_index)
+    batch[i + POS_OFFSET + 3] = tag_id_by_word_index(buffer_word_index)
   end
 
   #=
@@ -215,18 +214,17 @@ function form_batch(model::Model, settings::Settings, config::Configuration)
     get_right_child(config.tree, config_word_index) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 2)
     get_left_child(config.tree, config_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 3)
     get_right_child(config.tree, config_word_index, child_number=2) |> word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 4)
+    get_left_child(config.tree, config_word_index) |> 
+      word_index -> get_left_child(config.tree, word_index) |>
+      word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 5)
+    get_right_child(config.tree, config_word_index) |> 
+      word_index -> get_right_child(config.tree, word_index) |>
+      word_index -> set_word_data_by_index_with_offset(word_index, offset_number * STACK_NUMBER + 6)
   end
 
   set_children_data(get_stack_element(config, 1), 0)
   set_children_data(get_buffer_element(config, 1), 1)
   
-  batch
-end
-
-function take_batch_embeddings(model, batch)
-  take_embedding(word_index::Integer) = view(model.embeddings, word_index, :)
-  batch = map(take_embedding, batch)
-
   batch
 end
 
