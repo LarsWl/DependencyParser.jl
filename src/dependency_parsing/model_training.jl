@@ -28,6 +28,52 @@ end
 log(message) = @info "$(Dates.now()) $message"
 
 function train!()
+	model, training_context, dataset = init_train()
+	
+	train_samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
+	test_sample = sample(dataset, 100; replace=false)
+	# test_gold= cu(hcat(map(last, test_sample)...))
+	test_gold= hcat(map(last, test_sample)...)
+	test_features = map(first, test_sample)
+
+	training_context.test_dataset = build_dataset(model, sample(training_context.test_connlu_sentences, 50; replace=false), training_context)
+	
+	train_epoch = () -> begin
+		count = 0
+
+		for train_sample in train_samples
+			if count % 5 == 0 || count == 1
+				@time update_model!(model, train_sample, training_context)
+			else
+				update_model!(model, train_sample, training_context)
+			end
+			
+			GC.gc()
+
+			pre_map = init_pre_compute_map(test_sample, training_context)
+			saved = pre_compute(pre_map, model, training_context)
+
+			if count % 3 == 0
+				log("Current loss: $(transitions_loss(model, test_gold, test_features, training_context, pre_map, saved))")
+			end
+ 
+			if count % 10 == 0
+				@info "Start calculating UAS/LAS..."
+				@time test_training_scores(model, training_context)
+			end
+
+			count += 1
+		end
+
+		@info "Start calculating UAS/LAS..."
+		test_training_scores(model, training_context)
+	end
+
+	@info "Start training"
+	Flux.@epochs 500 train_epoch()
+end
+
+function init_train()
 	log("Initializing model...")
 
 	system = ArcEager.ArcEagerSystem()
@@ -39,7 +85,7 @@ function train!()
 	connlu_sentences = load_connlu_file(train_file)
 	settings = Settings(embeddings_size=100)
 	model = Model(settings, system, connlu_sentences)
-	enable_cuda(model)
+	# enable_cuda(model)
 
 	Flux.testmode!(model.dropout, false)
 
@@ -64,73 +110,24 @@ function train!()
 	training_context.optimizer = ADAM()
 
 	dataset = init_dataset()
-	train_samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
-	test_sample = sample(dataset, 100; replace=false)
-	test_gold= cu(hcat(map(last, test_sample)...))
-	test_features = map(first, test_sample)
 
-	training_context.test_dataset = build_dataset(model, sample(training_context.test_connlu_sentences, 50; replace=false), training_context)
-	
-	train_epoch = () -> begin
-		count = 1
-
-		for train_sample in train_samples
-			if count == 2
-				@time update_model!(model, train_sample, training_context)
-			else
-				update_model!(model, train_sample, training_context)
-			end
-			
-			GC.gc()
-
-			pre_map = init_pre_compute_map(test_sample, training_context)
-			saved = pre_compute(pre_map, model, training_context)
-
-			if count % 5 == 0
-				log("Current loss: $(transitions_loss(model, test_gold, test_features, training_context, pre_map, saved))")
-			end
-
-			if count % 50 == 0
-				@info "Start calculating UAS/LAS..."
-				@time test_training_scores(model, training_context)
-			end
-
-			count += 1
-		end
-
-		@info "Start calculating UAS/LAS..."
-		test_training_scores(model, training_context)
-	end
-
-	@info "Start training"
-	Flux.@epochs 500 train_epoch()
+	(model, training_context, dataset)
 end
 
+# global cnt = 0
+# global cnt2 = 0
+
+# test_sample = sample(dataset, 2_000; replace=false)
+
+# test_sample[begin][begin]
+
+# @time update_model!(model, test_sample, training_context)
+# @show cnt
+# @show cnt2
 # transitions_loss(model, test_gold, test_features, training_context, pre_map, saved)
 
 # scores = test_features .|> feature -> calculate_scores(model, feature, training_context, pre_map, saved)
 # test_gold
-
-# sum(hcat(scores...), dims=1)
-# sum(test_gold, dims=1)
-
-# Flux.focal_loss(hcat(scores...), test_gold)
-
-# y = test_gold |> collect
-# ŷ = hcat(scores...) .+ Flux.epseltype(ŷ)
-
-# dims=1
-# agg = mean
-# @. -y * (1 - ŷ)^2 * log(ŷ)
-
-
-# log(ŷ .+ 1)
-
-# ŷ
-
-# @. log(rand(3, 3))
-
-# @. -y * (1 - ŷ) ^ 2 * log(ŷ)
 
 function update_model!(model::Model, train_sample, training_context::TrainingContext)
 	ps = Flux.params(model)
@@ -138,7 +135,11 @@ function update_model!(model::Model, train_sample, training_context::TrainingCon
 	pre_map = init_pre_compute_map(train_sample, training_context)
 	saved = pre_compute(pre_map, model, training_context)
 
-	gold = cu(hcat(map(last, train_sample)...))
+	@show length(pre_map)
+	@show size(saved)
+
+	# gold = cu(hcat(map(last, train_sample)...))
+	gold = hcat(map(last, train_sample)...)
 	features = map(first, train_sample)
 
 	grads = gradient(ps) do
@@ -152,21 +153,25 @@ end
 function transitions_loss(model, gold, features, training_context, pre_map, saved)
 	scores = features .|> feature -> calculate_scores(model, feature, training_context, pre_map, saved)
 
-	abs(Flux.focal_loss(hcat(scores...), gold))
+	Flux.crossentropy(hcat(scores...), gold)
 end
 
 function calculate_scores(model, feature, training_context, pre_map, saved)
-	hidden = cu(zeros(Float32, training_context.settings.hidden_size))
+	# hidden = cu(zeros(Float32, training_context.settings.hidden_size))
+	hidden = zeros(Float32, training_context.settings.hidden_size)
 
 	for i in 1:training_context.settings.batch_size
 		tok = feature[i]
-		index = tok * training_context.settings.batch_size + i
+		index = tok * training_context.settings.batch_size + i - 1
 
 		if haskey(pre_map, index)
+			global cnt2 += 1
 			id = pre_map[index]
 
 			hidden += saved[id]
 		else
+			global cnt += 1
+
 			offset = (i - 1) * training_context.settings.embeddings_size
 			hidden_slice = view(model.hidden_layer.weight, :, (offset + 1):(offset + training_context.settings.embeddings_size))
 
@@ -176,7 +181,7 @@ function calculate_scores(model, feature, training_context, pre_map, saved)
 	
 	hidden += model.hidden_layer.bias
 
-	(hidden .^ 3) |> model.dropout |> model.output_layer  |> softmax
+	(hidden .^ 3) |> model.dropout |> model.output_layer |> softmax
 end
 
 function init_pre_compute_map(dataset, training_context)
@@ -193,7 +198,7 @@ function init_pre_compute_map(dataset, training_context)
 		end
 	end
 
-	num_precomputed = min(length(counter), 20_000)
+	num_precomputed = min(length(counter), 10_000)
 
 	to_precompute = sort(collect(counter); by=last,rev=true)[begin:begin + num_precomputed - 1] .|> first
 
@@ -220,7 +225,8 @@ function pre_compute(pre_map, model, training_context)
 	end
 
 	map(1:first(size(saved))) do i
-		cu(saved[i, :])
+		# cu(saved[i, :])
+		saved[i, :]
 	end
 end
 

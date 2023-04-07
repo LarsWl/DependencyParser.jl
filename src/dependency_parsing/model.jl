@@ -46,7 +46,7 @@ mutable struct Model
   function Model(settings::Settings, system::ParsingSystem, connlu_sentences::Vector{ConnluSentence})
     model = new()
 
-    pretrained = load_embeddings(GloVe{:en}, 2, max_vocab_size=250_000)
+    pretrained = load_embeddings(GloVe{:en}, 2, max_vocab_size=125_000)
     if size(pretrained.embeddings)[begin]!= settings.embeddings_size
       ArgumentError("Incorrect embeddings dimensions. Given: $(embeddings_size). In settings: $(settings.embeddings_size)") |> throw
     end
@@ -54,7 +54,7 @@ mutable struct Model
     set_corpus_data!(model, connlu_sentences)
     set_labels!(system, model.label_ids |> keys |> collect)
 
-    model.embeddings = rand(Float64, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), settings.embeddings_size)
+    model.embeddings = rand(Float32, length(model.word_ids) + length(model.tag_ids) + length(model.label_ids), settings.embeddings_size)
     match_embeddings!(model.embeddings, pretrained, model.word_ids |> keys |> collect)
   
     model.hidden_layer = Dense(settings.batch_size * settings.embeddings_size, settings.hidden_size)
@@ -79,6 +79,7 @@ function enable_cuda(model::Model)
     model.hidden_layer = fmap(cu, model.hidden_layer)
     model.output_layer = fmap(cu, model.output_layer)
     model.hidden_accumulator = cu(model.hidden_accumulator)
+    model.dropout = Dropout(0.5, rng=CUDA.default_rng())
   end
 end
 
@@ -117,7 +118,7 @@ function predict_transition(model::Model, settings::Settings, system::ParsingSys
   system.transitions[scores[score_index][begin]]
 end
 
-function match_embeddings!(embeddings::Matrix{Float64}, pretrained, known_words::Vector{String})
+function match_embeddings!(embeddings::Matrix{Float32}, pretrained, known_words::Vector{String})
   embeddings_size = size(embeddings)[end]
   
   foreach(enumerate(known_words)) do (index, word)
