@@ -32,32 +32,31 @@ function train!()
 	
 	train_samples = Flux.DataLoader(dataset, batchsize=training_context.settings.sample_size, shuffle=true)
 	test_sample = sample(dataset, 100; replace=false)
-	# test_gold= cu(hcat(map(last, test_sample)...))
-	test_gold= hcat(map(last, test_sample)...)
-	test_features = map(first, test_sample)
 
 	training_context.test_dataset = build_dataset(model, sample(training_context.test_connlu_sentences, 50; replace=false), training_context)
 	
 	train_epoch = () -> begin
-		count = 0
+		count = 1
+		number_of_updates = ceil(length(dataset) / training_context.settings.sample_size)
 
 		for train_sample in train_samples
-			if count % 5 == 0 || count == 1
+			if (count % (div(number_of_updates, 10))) == 0 || count == 1 || count == 2
 				@time update_model!(model, train_sample, training_context)
 			else
 				update_model!(model, train_sample, training_context)
 			end
-			
-			GC.gc()
 
 			pre_map = init_pre_compute_map(test_sample, training_context)
 			saved = pre_compute(pre_map, model, training_context)
 
-			if count % 3 == 0
-				log("Current loss: $(transitions_loss(model, test_gold, test_features, training_context, pre_map, saved))")
+			if (count % (div(number_of_updates, 20))) == 0 || count == 1
+				log("Current loss: $(sample_loss(model, train_sample, training_context, pre_map, saved))")
+
+				ps = Flux.params(model)
+				log("Regularization: $(L2_norm(ps, training_context.settings))")
 			end
  
-			if count % 10 == 0
+			if (count % (div(number_of_updates, 5))) == 0
 				@info "Start calculating UAS/LAS..."
 				@time test_training_scores(model, training_context)
 			end
@@ -107,27 +106,30 @@ function init_train()
 		beam_coef = 0.05
 	)
 
-	training_context.optimizer = ADAM()
+	training_context.optimizer = ADAM(0.005)
 
 	dataset = init_dataset()
 
 	(model, training_context, dataset)
 end
 
-# global cnt = 0
-# global cnt2 = 0
+# test_sample = sample(dataset, 100; replace=false)
+# test_gold= hcat(map(last, test_sample)...)
+# test_features = map(first, test_sample)
+# pre_map = init_pre_compute_map(test_sample, training_context)
+# saved = pre_compute(pre_map, model, training_context)
 
-# test_sample = sample(dataset, 2_000; replace=false)
-
-# test_sample[begin][begin]
-
-# @time update_model!(model, test_sample, training_context)
-# @show cnt
-# @show cnt2
 # transitions_loss(model, test_gold, test_features, training_context, pre_map, saved)
 
-# scores = test_features .|> feature -> calculate_scores(model, feature, training_context, pre_map, saved)
-# test_gold
+# sum(test_sample) do sample
+# 	transition_loss(model, last(sample), first(sample), training_context, pre_map, saved)
+# end + L2_norm(ps, training_context.settings)
+
+# feature = test_features[begin]
+# gold = test_sample[begin][end]
+# scores = calculate_scores(model, feature, training_context, pre_map, saved) |> softmax
+
+# update_model!(model, test_sample, training_context)
 
 function update_model!(model::Model, train_sample, training_context::TrainingContext)
 	ps = Flux.params(model)
@@ -135,25 +137,30 @@ function update_model!(model::Model, train_sample, training_context::TrainingCon
 	pre_map = init_pre_compute_map(train_sample, training_context)
 	saved = pre_compute(pre_map, model, training_context)
 
-	@show length(pre_map)
-	@show size(saved)
-
-	# gold = cu(hcat(map(last, train_sample)...))
-	gold = hcat(map(last, train_sample)...)
-	features = map(first, train_sample)
+	# train_sample = map(train_sample) do (feature, gold)
+	# 	(feature, cu(gold))
+	# end
 
 	grads = gradient(ps) do
-		transitions_loss(model, gold, features, training_context, pre_map, saved) +
-			L2_norm(ps, training_context.settings)
+		sample_loss(model, train_sample, training_context, pre_map, saved) + L2_norm(ps, training_context.settings)
 	end
 
 	Flux.update!(training_context.optimizer, ps, grads)
 end
 
-function transitions_loss(model, gold, features, training_context, pre_map, saved)
-	scores = features .|> feature -> calculate_scores(model, feature, training_context, pre_map, saved)
+function sample_loss(model, sample, training_context, pre_map, saved)
+	mean(sample) do example
+		feature = first(example)
+		gold = last(example)
 
-	Flux.crossentropy(hcat(scores...), gold)
+		transition_loss(model, gold, feature, training_context, pre_map, saved)
+	end 
+end
+
+function transition_loss(model, gold, feature, training_context, pre_map, saved)
+	scores = calculate_scores(model, feature, training_context, pre_map, saved) |> softmax
+
+	Flux.focal_loss(scores, gold)
 end
 
 function calculate_scores(model, feature, training_context, pre_map, saved)
@@ -165,13 +172,10 @@ function calculate_scores(model, feature, training_context, pre_map, saved)
 		index = tok * training_context.settings.batch_size + i - 1
 
 		if haskey(pre_map, index)
-			global cnt2 += 1
 			id = pre_map[index]
 
 			hidden += saved[id]
 		else
-			global cnt += 1
-
 			offset = (i - 1) * training_context.settings.embeddings_size
 			hidden_slice = view(model.hidden_layer.weight, :, (offset + 1):(offset + training_context.settings.embeddings_size))
 
@@ -181,7 +185,7 @@ function calculate_scores(model, feature, training_context, pre_map, saved)
 	
 	hidden += model.hidden_layer.bias
 
-	(hidden .^ 3) |> model.dropout |> model.output_layer |> softmax
+	(hidden .^ 3) |> model.dropout |> model.output_layer
 end
 
 function init_pre_compute_map(dataset, training_context)
@@ -198,7 +202,7 @@ function init_pre_compute_map(dataset, training_context)
 		end
 	end
 
-	num_precomputed = min(length(counter), 10_000)
+	num_precomputed = min(length(counter), 20_000)
 
 	to_precompute = sort(collect(counter); by=last,rev=true)[begin:begin + num_precomputed - 1] .|> first
 
@@ -206,7 +210,7 @@ function init_pre_compute_map(dataset, training_context)
 end
 
 function pre_compute(pre_map, model, training_context)
-	saved = zeros(length(pre_map), training_context.settings.hidden_size)
+	saved = zeros(Float32, length(pre_map), training_context.settings.hidden_size)
 
 	hidden_weight = collect(model.hidden_layer.weight)
 	embeddings = collect(model.embeddings)
